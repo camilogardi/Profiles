@@ -112,10 +112,9 @@ def idw_interpolate(points, values, grid_x, grid_y, power=2.0):
     # Flatten the grid
     grid_points = np.c_[grid_x.ravel(), grid_y.ravel()]
     
-    # Compute distances from each grid point to all data points
-    distances = np.zeros((grid_points.shape[0], points.shape[0]))
-    for i, grid_point in enumerate(grid_points):
-        distances[i, :] = np.sqrt(np.sum((points - grid_point) ** 2, axis=1))
+    # Compute distances from each grid point to all data points using vectorized operations
+    # Shape: (n_grid_points, n_data_points)
+    distances = np.sqrt(np.sum((points[None, :, :] - grid_points[:, None, :]) ** 2, axis=2))
     
     # Avoid division by zero - if distance is very small, use the point value directly
     epsilon = 1e-10

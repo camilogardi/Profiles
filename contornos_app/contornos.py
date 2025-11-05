@@ -80,7 +80,8 @@ method = st.sidebar.selectbox("Método de interpolación", options=["griddata_li
 grid_nx = st.sidebar.number_input("Resolución grilla en X (puntos)", min_value=50, max_value=1000, value=200, step=10)
 grid_ny = st.sidebar.number_input("Resolución grilla en Y (puntos)", min_value=50, max_value=1000, value=200, step=10)
 levels = st.sidebar.number_input("Número de niveles de contorno", min_value=3, max_value=50, value=10)
-cmap = st.sidebar.selectbox("Colormap", options=plt.colormaps(), index=plt.colormaps().index("viridis") if "viridis" in plt.colormaps() else 0)
+colormap_list = sorted([m for m in plt.colormaps()])
+cmap = st.sidebar.selectbox("Colormap", options=colormap_list, index=colormap_list.index("viridis") if "viridis" in colormap_list else 0)
 
 st.sidebar.markdown("Seleccione elevación (z) para el plano de contorno")
 z_mode = st.sidebar.radio("Modo", options=["Un nivel", "Múltiples niveles"])
