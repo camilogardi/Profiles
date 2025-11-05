@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib import cm
 from io import BytesIO
 
 from utils import read_table, make_grid, interpolate_grid, idw_interpolate, compute_z_bounds
@@ -80,7 +79,12 @@ method = st.sidebar.selectbox("Método de interpolación", options=["griddata_li
 grid_nx = st.sidebar.number_input("Resolución grilla en X (puntos)", min_value=50, max_value=1000, value=200, step=10)
 grid_ny = st.sidebar.number_input("Resolución grilla en Y (puntos)", min_value=50, max_value=1000, value=200, step=10)
 levels = st.sidebar.number_input("Número de niveles de contorno", min_value=3, max_value=50, value=10)
-colormap_list = sorted([m for m in plt.colormaps()])
+# Cache the colormap list to improve performance
+@st.cache_data
+def get_colormap_list():
+    return sorted([m for m in plt.colormaps()])
+
+colormap_list = get_colormap_list()
 cmap = st.sidebar.selectbox("Colormap", options=colormap_list, index=colormap_list.index("viridis") if "viridis" in colormap_list else 0)
 
 st.sidebar.markdown("Seleccione elevación (z) para el plano de contorno")
@@ -110,7 +114,8 @@ for z in z_levels:
     pts = df_clean[mask]
     st.write(f"Elevación z = {z:.2f} → puntos que cubren el plano: {len(pts)}")
     if len(pts) < 3:
-        st.warning(f"Pocos puntos ({len(pts)}) cubren el plano z={z:.2f}; la interpolación puede ser inestable o imposible.")
+        st.warning(f"Pocos puntos ({len(pts)}) cubren el plano z={z:.2f}; la interpolación no es posible. Se requieren al menos 3 puntos.")
+        continue
     # create grid
     xmin, xmax = df_clean["x"].min(), df_clean["x"].max()
     ymin, ymax = df_clean["y"].min(), df_clean["y"].max()
@@ -131,6 +136,12 @@ for z in z_levels:
         st.error(f"Error durante interpolación para z={z}: {e}")
         continue
 
+    # Check if grid has sufficient finite values for plotting
+    finite_count = np.sum(np.isfinite(grid_z))
+    if finite_count < 3:
+        st.warning(f"Interpolación para z={z:.2f} produjo muy pocos valores finitos ({finite_count}). No se puede graficar.")
+        continue
+    
     # plot
     fig, ax = plt.subplots(figsize=(8, 6))
     # mask nan

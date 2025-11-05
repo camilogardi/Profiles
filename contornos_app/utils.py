@@ -108,12 +108,18 @@ def idw_interpolate(points, values, grid_x, grid_y, power=2.0):
     -------
     grid_z : 2D array
         Interpolated values on the grid.
+        
+    Notes
+    -----
+    For very large grids (>1000x1000), this function may consume significant memory
+    due to the distance matrix. Consider using lower resolution grids for large areas.
     """
     # Flatten the grid
     grid_points = np.c_[grid_x.ravel(), grid_y.ravel()]
     
     # Compute distances from each grid point to all data points using vectorized operations
     # Shape: (n_grid_points, n_data_points)
+    # Note: This creates a large intermediate array in memory
     distances = np.sqrt(np.sum((points[None, :, :] - grid_points[:, None, :]) ** 2, axis=2))
     
     # Avoid division by zero - if distance is very small, use the point value directly
