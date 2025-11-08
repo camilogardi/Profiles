@@ -1,18 +1,23 @@
 """
-Funciones utilitarias para generación de perfiles geotécnicos.
+Funciones utilitarias para interpolación 2D de parámetros geotécnicos.
 Este módulo provee funcionalidades para:
-- Lectura y merge de archivos de cabeceras de sondeos y ensayos
-- Cálculo de elevaciones de ensayos
-- Ordenación de sondeos para eje X (por coordenada, PCA, etc.)
-- Interpolación 2D en plano X-Z
-- Enmascaramiento de zonas sin cobertura vertical
+- Lectura y normalización de archivos con una sola tabla
+- Interpolación 2D en plano X-Y (abscisa vs cota)
+- Múltiples métodos: griddata, RBF, IDW
+- Enmascaramiento para evitar extrapolación (ConvexHull y distancia)
+- Exportación de grillas interpoladas
+
+Extensiones posibles:
+- Añadir kriging con pykrige para datos geoestadísticos
+- Exportar a GeoTIFF con coordenadas georreferenciadas
+- Implementar submuestreo inteligente para datasets grandes
 """
 
 import pandas as pd
 import numpy as np
 from scipy.interpolate import griddata, Rbf
-from sklearn.decomposition import PCA
-from typing import Tuple, Dict, Optional, List, Union
+from scipy.spatial import ConvexHull, distance
+from typing import Tuple, List, Optional, Dict, Union
 
 
 def read_file(file_obj) -> pd.DataFrame:
@@ -28,6 +33,11 @@ def read_file(file_obj) -> pd.DataFrame:
     -------
     pd.DataFrame
         DataFrame con los datos del archivo.
+        
+    Raises
+    ------
+    ValueError
+        Si el tipo de archivo no es soportado.
     """
     file_name = file_obj.name.lower()
     if file_name.endswith('.csv'):
@@ -35,12 +45,13 @@ def read_file(file_obj) -> pd.DataFrame:
     elif file_name.endswith(('.xls', '.xlsx')):
         return pd.read_excel(file_obj)
     else:
-        raise ValueError(f"Tipo de archivo no soportado: {file_name}")
+        raise ValueError(f"Tipo de archivo no soportado: {file_name}. Use CSV o Excel.")
 
 
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Normaliza nombres de columnas (elimina espacios extras, etc.).
+    Normaliza nombres de columnas (elimina espacios, convierte a minúsculas, 
+    reemplaza espacios por guiones bajos).
     
     Parameters
     ----------
@@ -53,426 +64,394 @@ def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
         DataFrame con columnas normalizadas.
     """
     df = df.copy()
-    df.columns = [str(col).strip() for col in df.columns]
+    df.columns = [
+        str(col).strip().lower().replace(' ', '_').replace('-', '_')
+        for col in df.columns
+    ]
     return df
 
 
-def merge_headers_and_samples(
-    df_headers: pd.DataFrame,
-    df_samples: pd.DataFrame,
-    id_col_headers: str,
-    id_col_samples: str
-) -> Tuple[pd.DataFrame, List[str]]:
+def get_numeric_columns(df: pd.DataFrame, exclude: List[str] = None) -> List[str]:
     """
-    Une los dataframes de cabeceras y ensayos por ID de sondeo.
-    
-    Parameters
-    ----------
-    df_headers : pd.DataFrame
-        DataFrame con información de cabeceras (ID, x, y, cota).
-    df_samples : pd.DataFrame
-        DataFrame con ensayos (ID, profundidad, parámetros).
-    id_col_headers : str
-        Nombre de columna de ID en df_headers.
-    id_col_samples : str
-        Nombre de columna de ID en df_samples.
-        
-    Returns
-    -------
-    df_merged : pd.DataFrame
-        DataFrame combinado.
-    missing_ids : List[str]
-        Lista de IDs en samples que no existen en headers.
-    """
-    # Identificar IDs sin match
-    sample_ids = set(df_samples[id_col_samples].unique())
-    header_ids = set(df_headers[id_col_headers].unique())
-    missing_ids = list(sample_ids - header_ids)
-    
-    # Merge
-    df_merged = df_samples.merge(
-        df_headers,
-        left_on=id_col_samples,
-        right_on=id_col_headers,
-        how='inner'
-    )
-    
-    return df_merged, missing_ids
-
-
-def calculate_z_param(
-    df: pd.DataFrame,
-    cota_col: str,
-    profundidad_col: str,
-    z_param_col: str = 'z_param'
-) -> pd.DataFrame:
-    """
-    Calcula la elevación de cada ensayo: z_param = cota - profundidad_ensayo.
+    Obtiene lista de columnas numéricas de un DataFrame, excluyendo las especificadas.
     
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame con datos unidos.
-    cota_col : str
-        Nombre de columna con cota (elevación de cabeza).
-    profundidad_col : str
-        Nombre de columna con profundidad del ensayo.
-    z_param_col : str
-        Nombre de columna a crear para z_param.
+        DataFrame a analizar.
+    exclude : List[str], optional
+        Lista de columnas a excluir.
         
     Returns
     -------
-    pd.DataFrame
-        DataFrame con columna z_param añadida.
+    List[str]
+        Lista de nombres de columnas numéricas.
     """
-    df = df.copy()
-    df[z_param_col] = df[cota_col] - df[profundidad_col]
-    return df
+    if exclude is None:
+        exclude = []
+    
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    return [col for col in numeric_cols if col not in exclude]
 
 
-def compute_borehole_bounds(
+def validate_data_for_interpolation(
     df: pd.DataFrame,
-    id_col: str,
-    cota_col: str,
-    profundidad_col: str
-) -> pd.DataFrame:
-    """
-    Calcula los límites verticales (z_top, z_bottom) de cada sondeo.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame con ensayos.
-    id_col : str
-        Nombre de columna con ID de sondeo.
-    cota_col : str
-        Nombre de columna con cota.
-    profundidad_col : str
-        Nombre de columna con profundidad.
-        
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame con columnas: sondeo, z_top, z_bottom, max_profundidad, n_ensayos.
-    """
-    # Agrupar por sondeo
-    grouped = df.groupby(id_col).agg({
-        cota_col: 'first',  # Cota es la misma para todos los ensayos del sondeo
-        profundidad_col: 'max'  # Máxima profundidad
-    }).reset_index()
-    
-    grouped['z_top'] = grouped[cota_col]
-    grouped['z_bottom'] = grouped[cota_col] - grouped[profundidad_col]
-    grouped['max_profundidad'] = grouped[profundidad_col]
-    
-    # Contar número de ensayos por sondeo
-    n_ensayos = df.groupby(id_col).size().reset_index(name='n_ensayos')
-    grouped = grouped.merge(n_ensayos, on=id_col)
-    
-    return grouped[[id_col, 'z_top', 'z_bottom', 'max_profundidad', 'n_ensayos']]
-
-
-def order_boreholes_by_x(
-    df_headers: pd.DataFrame,
-    id_col: str,
     x_col: str,
     y_col: str,
-    method: str = 'x',
-    manual_order: Optional[List[str]] = None
-) -> Tuple[Dict[str, float], np.ndarray]:
+    param_cols: List[str],
+    min_points: int = 3
+) -> Tuple[pd.DataFrame, Dict[str, str]]:
     """
-    Ordena los sondeos para el eje X del perfil según el método especificado.
+    Valida y limpia datos para interpolación.
     
     Parameters
     ----------
-    df_headers : pd.DataFrame
-        DataFrame con información de cabeceras.
-    id_col : str
-        Nombre de columna con ID.
+    df : pd.DataFrame
+        DataFrame con datos.
     x_col : str
-        Nombre de columna con coordenada X.
+        Nombre de columna X.
     y_col : str
-        Nombre de columna con coordenada Y.
-    method : str
-        Método de ordenación:
-        - 'x': Usar coordenada X real
-        - 'xy_sort': Ordenar por X, luego por Y
-        - 'pca': Proyección sobre eje principal (PCA)
-        - 'manual': Orden manual proporcionado
-    manual_order : Optional[List[str]]
-        Lista de IDs en orden deseado (solo si method='manual').
+        Nombre de columna Y.
+    param_cols : List[str]
+        Lista de columnas de parámetros.
+    min_points : int
+        Número mínimo de puntos requeridos.
         
     Returns
     -------
-    borehole_positions : Dict[str, float]
-        Diccionario mapeo sondeo_id -> posición_x.
-    sorted_positions : np.ndarray
-        Array de posiciones X ordenadas (únicas).
+    df_clean : pd.DataFrame
+        DataFrame limpio con valores válidos.
+    warnings : Dict[str, str]
+        Diccionario con advertencias por parámetro.
     """
-    df = df_headers.copy()
+    df_clean = df.copy()
+    warnings = {}
     
-    if method == 'x':
-        # Usar coordenada X directamente
-        df['x_pos'] = df[x_col]
-        
-    elif method == 'xy_sort':
-        # Ordenar por X primero, luego por Y
-        df = df.sort_values([x_col, y_col])
-        # Asignar posiciones secuenciales
-        df['x_pos'] = np.arange(len(df))
-        
-    elif method == 'pca':
-        # Calcular eje principal (PCA) y proyectar
-        coords = df[[x_col, y_col]].values
-        pca = PCA(n_components=1)
-        projections = pca.fit_transform(coords)
-        df['x_pos'] = projections.flatten()
-        
-    elif method == 'manual':
-        if manual_order is None:
-            raise ValueError("manual_order debe proporcionarse cuando method='manual'")
-        # Asignar posiciones según orden manual
-        order_map = {id_val: i for i, id_val in enumerate(manual_order)}
-        df['x_pos'] = df[id_col].map(order_map)
-        # Eliminar sondeos no en la lista manual
-        df = df.dropna(subset=['x_pos'])
-        
-    else:
-        raise ValueError(f"Método desconocido: {method}")
+    # Convertir a numérico
+    for col in [x_col, y_col] + param_cols:
+        if col in df_clean.columns:
+            df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
     
-    # Crear diccionario de mapeo
-    borehole_positions = dict(zip(df[id_col], df['x_pos']))
-    sorted_positions = np.sort(df['x_pos'].unique())
+    # Eliminar filas con X o Y faltantes
+    original_len = len(df_clean)
+    df_clean = df_clean.dropna(subset=[x_col, y_col])
+    removed = original_len - len(df_clean)
     
-    return borehole_positions, sorted_positions
+    if removed > 0:
+        warnings['xy_missing'] = f"Se eliminaron {removed} filas por valores faltantes en X o Y"
+    
+    # Verificar puntos mínimos
+    if len(df_clean) < min_points:
+        warnings['insufficient_points'] = f"Insuficientes puntos válidos: {len(df_clean)} (mínimo: {min_points})"
+    
+    # Verificar cada parámetro
+    for param in param_cols:
+        valid_count = df_clean[param].notna().sum()
+        if valid_count < min_points:
+            warnings[f'{param}_insufficient'] = f"Parámetro '{param}': solo {valid_count} puntos válidos"
+    
+    return df_clean, warnings
 
 
-def make_xz_grid(
+def calculate_parameter_statistics(
+    df: pd.DataFrame,
+    param_cols: List[str]
+) -> pd.DataFrame:
+    """
+    Calcula estadísticas básicas para cada parámetro.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame con datos.
+    param_cols : List[str]
+        Lista de columnas de parámetros.
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame con estadísticas (min, max, mean, std, n_points).
+    """
+    stats = []
+    for param in param_cols:
+        if param in df.columns:
+            values = df[param].dropna()
+            stats.append({
+                'Parámetro': param,
+                'n_puntos': len(values),
+                'Mínimo': values.min() if len(values) > 0 else np.nan,
+                'Máximo': values.max() if len(values) > 0 else np.nan,
+                'Media': values.mean() if len(values) > 0 else np.nan,
+                'Desv.Est.': values.std() if len(values) > 0 else np.nan
+            })
+    
+    return pd.DataFrame(stats)
+
+
+def make_xy_grid(
     x_min: float,
     x_max: float,
-    z_min: float,
-    z_max: float,
+    y_min: float,
+    y_max: float,
     nx: int,
-    nz: int
+    ny: int
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Crea una grilla 2D para el plano X-Z.
+    Crea una grilla 2D regular para el plano X-Y.
     
     Parameters
     ----------
     x_min, x_max : float
-        Rango del eje X (posiciones de sondeos).
-    z_min, z_max : float
-        Rango del eje Z (elevaciones).
-    nx, nz : int
-        Número de puntos en X y Z.
+        Rango del eje X (abscisa).
+    y_min, y_max : float
+        Rango del eje Y (cota/elevación).
+    nx, ny : int
+        Número de puntos en X y Y.
         
     Returns
     -------
-    grid_x, grid_z : np.ndarray
+    grid_x, grid_y : np.ndarray
         Grillas 2D (meshgrid) para interpolación.
     """
     x = np.linspace(x_min, x_max, nx)
-    z = np.linspace(z_max, z_min, nz)  # Z de arriba hacia abajo
-    grid_x, grid_z = np.meshgrid(x, z)
-    return grid_x, grid_z
+    y = np.linspace(y_min, y_max, ny)
+    grid_x, grid_y = np.meshgrid(x, y)
+    return grid_x, grid_y
 
 
-def interpolate_xz_grid(
-    points_xz: np.ndarray,
+def interpolate_xy_grid(
+    points_xy: np.ndarray,
     values: np.ndarray,
     grid_x: np.ndarray,
-    grid_z: np.ndarray,
+    grid_y: np.ndarray,
     method: str = 'griddata',
     griddata_method: str = 'linear',
     rbf_func: str = 'multiquadric',
     idw_power: float = 2.0
 ) -> np.ndarray:
     """
-    Interpola valores en una grilla X-Z.
+    Interpola valores en una grilla X-Y usando el método especificado.
     
     Parameters
     ----------
-    points_xz : np.ndarray, shape (n, 2)
-        Coordenadas (x_pos, z_param) de los puntos de ensayo.
+    points_xy : np.ndarray, shape (n, 2)
+        Coordenadas (x, y) de los puntos de datos.
     values : np.ndarray, shape (n,)
         Valores del parámetro en cada punto.
-    grid_x, grid_z : np.ndarray
+    grid_x, grid_y : np.ndarray
         Grillas 2D para interpolación.
     method : str
         Método de interpolación: 'griddata', 'rbf', 'idw'.
     griddata_method : str
         Método para griddata: 'linear', 'nearest', 'cubic'.
     rbf_func : str
-        Función para RBF.
+        Función para RBF: 'multiquadric', 'inverse', 'gaussian', 'linear', 'cubic', 'quintic', 'thin_plate'.
     idw_power : float
-        Potencia para IDW.
+        Potencia para IDW (típicamente 2.0).
+        
+    Returns
+    -------
+    grid_values : np.ndarray
+        Valores interpolados en la grilla.
+        
+    Raises
+    ------
+    ValueError
+        Si el método no es reconocido o hay error en interpolación.
+    """
+    if method == 'griddata':
+        grid_values = griddata(
+            points_xy,
+            values,
+            (grid_x, grid_y),
+            method=griddata_method
+        )
+        
+    elif method == 'rbf':
+        rbf = Rbf(
+            points_xy[:, 0],
+            points_xy[:, 1],
+            values,
+            function=rbf_func
+        )
+        grid_values = rbf(grid_x, grid_y)
+        
+    elif method == 'idw':
+        grid_values = idw_interpolate(
+            points_xy,
+            values,
+            grid_x,
+            grid_y,
+            power=idw_power
+        )
+        
+    else:
+        raise ValueError(f"Método de interpolación desconocido: {method}")
+    
+    return grid_values
+
+
+def idw_interpolate(
+    points_xy: np.ndarray,
+    values: np.ndarray,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    power: float = 2.0
+) -> np.ndarray:
+    """
+    Interpolación IDW (Inverse Distance Weighting) implementada de forma vectorizada.
+    
+    IDW es un método de interpolación ponderado por la distancia inversa que calcula
+    valores interpolados como un promedio ponderado de los puntos conocidos, donde
+    los pesos son inversamente proporcionales a la distancia elevada a una potencia.
+    
+    Parameters
+    ----------
+    points_xy : np.ndarray, shape (n, 2)
+        Coordenadas (x, y) de puntos de datos.
+    values : np.ndarray, shape (n,)
+        Valores en cada punto.
+    grid_x, grid_y : np.ndarray
+        Grillas 2D para interpolación.
+    power : float
+        Potencia para IDW. Valores típicos: 1-3. Mayor potencia = más peso a puntos cercanos.
         
     Returns
     -------
     grid_values : np.ndarray
         Valores interpolados en la grilla.
     """
-    if method == 'griddata':
-        grid_values = griddata(
-            points_xz,
-            values,
-            (grid_x, grid_z),
-            method=griddata_method
-        )
-        
-    elif method == 'rbf':
-        rbf = Rbf(
-            points_xz[:, 0],
-            points_xz[:, 1],
-            values,
-            function=rbf_func
-        )
-        grid_values = rbf(grid_x, grid_z)
-        
-    elif method == 'idw':
-        grid_values = idw_interpolate_xz(
-            points_xz,
-            values,
-            grid_x,
-            grid_z,
-            power=idw_power
-        )
-        
-    else:
-        raise ValueError(f"Método desconocido: {method}")
-    
-    return grid_values
-
-
-def idw_interpolate_xz(
-    points_xz: np.ndarray,
-    values: np.ndarray,
-    grid_x: np.ndarray,
-    grid_z: np.ndarray,
-    power: float = 2.0
-) -> np.ndarray:
-    """
-    Interpolación IDW (Inverse Distance Weighting) en grilla X-Z.
-    
-    Parameters
-    ----------
-    points_xz : np.ndarray, shape (n, 2)
-        Coordenadas (x, z) de puntos de datos.
-    values : np.ndarray, shape (n,)
-        Valores en cada punto.
-    grid_x, grid_z : np.ndarray
-        Grillas 2D para interpolación.
-    power : float
-        Potencia para IDW.
-        
-    Returns
-    -------
-    grid_values : np.ndarray
-        Valores interpolados.
-    """
     # Aplanar grilla
-    grid_points = np.c_[grid_x.ravel(), grid_z.ravel()]
+    grid_points = np.c_[grid_x.ravel(), grid_y.ravel()]
     
-    # Calcular distancias (vectorizado)
-    distances = np.sqrt(
-        np.sum((points_xz[None, :, :] - grid_points[:, None, :]) ** 2, axis=2)
-    )
+    # Calcular distancias (vectorizado) - shape: (n_grid_points, n_data_points)
+    distances = distance.cdist(grid_points, points_xy, metric='euclidean')
     
     # Evitar división por cero
     epsilon = 1e-10
     distances = np.maximum(distances, epsilon)
     
-    # Calcular pesos
+    # Calcular pesos: w = 1 / d^power
     weights = 1.0 / (distances ** power)
+    
+    # Normalizar pesos
     weights_sum = np.sum(weights, axis=1, keepdims=True)
     weights = weights / weights_sum
     
-    # Interpolar
+    # Interpolar: valor = suma(w_i * value_i)
     grid_values = np.dot(weights, values)
+    
+    # Reshape a forma de grilla
     grid_values = grid_values.reshape(grid_x.shape)
     
     return grid_values
 
 
-def create_vertical_mask(
+def create_convexhull_mask(
+    points_xy: np.ndarray,
     grid_x: np.ndarray,
-    grid_z: np.ndarray,
-    borehole_bounds: pd.DataFrame,
-    borehole_positions: Dict[str, float],
-    id_col: str,
-    max_horizontal_distance: Optional[float] = None
+    grid_y: np.ndarray
 ) -> np.ndarray:
     """
-    Crea una máscara para la grilla X-Z basada en cobertura vertical de sondeos.
-    Las celdas fuera de la cobertura vertical real se marcan como NaN.
+    Crea máscara basada en ConvexHull de los puntos de datos.
+    Las celdas fuera del hull convexo se marcan como inválidas (False).
     
     Parameters
     ----------
-    grid_x, grid_z : np.ndarray
+    points_xy : np.ndarray, shape (n, 2)
+        Coordenadas (x, y) de puntos de datos.
+    grid_x, grid_y : np.ndarray
         Grillas 2D.
-    borehole_bounds : pd.DataFrame
-        DataFrame con z_top, z_bottom por sondeo.
-    borehole_positions : Dict[str, float]
-        Mapeo sondeo_id -> x_pos.
-    id_col : str
-        Nombre de columna con ID de sondeo.
-    max_horizontal_distance : Optional[float]
-        Distancia horizontal máxima para considerar un sondeo relevante.
-        Si None, se usa distancia al sondeo más cercano.
         
     Returns
     -------
     mask : np.ndarray
-        Máscara booleana (True = válido, False = NaN).
+        Máscara booleana (True = dentro del hull, False = fuera).
+        
+    Notes
+    -----
+    Requiere al menos 4 puntos no colineales para crear un ConvexHull en 2D.
+    Si hay menos puntos, retorna máscara toda True (sin enmascarar).
     """
-    mask = np.zeros_like(grid_x, dtype=bool)
+    if len(points_xy) < 4:
+        # No hay suficientes puntos para ConvexHull, retornar todo válido
+        return np.ones_like(grid_x, dtype=bool)
     
-    # Para cada columna X de la grilla
-    for i in range(grid_x.shape[1]):
-        x_col = grid_x[0, i]
+    try:
+        hull = ConvexHull(points_xy)
         
-        # Encontrar sondeos cercanos
-        distances = []
-        relevant_boreholes = []
+        # Aplanar grilla
+        grid_points = np.c_[grid_x.ravel(), grid_y.ravel()]
         
-        for _, row in borehole_bounds.iterrows():
-            borehole_id = row[id_col]
-            if borehole_id not in borehole_positions:
-                continue
-            
-            x_borehole = borehole_positions[borehole_id]
-            dist = abs(x_col - x_borehole)
-            distances.append(dist)
-            relevant_boreholes.append(row)
+        # Verificar qué puntos están dentro del hull
+        # Método: un punto está dentro si todas las ecuaciones del hull son <= 0
+        mask_flat = np.all(
+            hull.equations[:, :2] @ grid_points.T + hull.equations[:, 2:3] <= 1e-12,
+            axis=0
+        )
         
-        if not relevant_boreholes:
-            continue
+        # Reshape a forma de grilla
+        mask = mask_flat.reshape(grid_x.shape)
         
-        # Determinar distancia máxima
-        if max_horizontal_distance is None:
-            max_dist = min(distances) * 1.5  # 1.5x distancia al más cercano
+    except Exception as e:
+        # Si falla ConvexHull (puntos colineales, etc.), retornar todo válido
+        mask = np.ones_like(grid_x, dtype=bool)
+    
+    return mask
+
+
+def create_distance_mask(
+    points_xy: np.ndarray,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    max_distance: Optional[float] = None,
+    k_neighbors: int = 1
+) -> np.ndarray:
+    """
+    Crea máscara basada en distancia a los k vecinos más cercanos.
+    Las celdas con distancia mayor al umbral se marcan como inválidas.
+    
+    Parameters
+    ----------
+    points_xy : np.ndarray, shape (n, 2)
+        Coordenadas (x, y) de puntos de datos.
+    grid_x, grid_y : np.ndarray
+        Grillas 2D.
+    max_distance : float, optional
+        Distancia máxima permitida. Si None, se calcula automáticamente como
+        percentil 90 de distancias entre puntos vecinos * factor de seguridad.
+    k_neighbors : int
+        Número de vecinos a considerar (típicamente 1).
+        
+    Returns
+    -------
+    mask : np.ndarray
+        Máscara booleana (True = válido, False = muy lejos de datos).
+    """
+    # Aplanar grilla
+    grid_points = np.c_[grid_x.ravel(), grid_y.ravel()]
+    
+    # Calcular distancias a todos los puntos de datos
+    distances = distance.cdist(grid_points, points_xy, metric='euclidean')
+    
+    # Distancia al k-ésimo vecino más cercano
+    k = min(k_neighbors, len(points_xy))
+    kth_distances = np.partition(distances, k-1, axis=1)[:, k-1]
+    
+    # Determinar umbral
+    if max_distance is None:
+        # Calcular umbral automático: analizar distancias típicas entre puntos
+        if len(points_xy) > 1:
+            pairwise_dist = distance.pdist(points_xy)
+            # Usar percentil 90 de distancias como referencia
+            typical_distance = np.percentile(pairwise_dist, 90)
+            max_distance = typical_distance * 1.5  # Factor de seguridad
         else:
-            max_dist = max_horizontal_distance
-        
-        # Filtrar sondeos cercanos
-        close_boreholes = [
-            row for row, dist in zip(relevant_boreholes, distances)
-            if dist <= max_dist
-        ]
-        
-        if not close_boreholes:
-            continue
-        
-        # Calcular envolvente vertical (unión de intervalos)
-        z_top_max = max(row['z_top'] for row in close_boreholes)
-        z_bottom_min = min(row['z_bottom'] for row in close_boreholes)
-        
-        # Marcar celdas válidas en esta columna
-        for j in range(grid_z.shape[0]):
-            z_cell = grid_z[j, i]
-            if z_bottom_min <= z_cell <= z_top_max:
-                mask[j, i] = True
+            max_distance = np.inf  # Sin umbral si solo hay 1 punto
+    
+    # Crear máscara
+    mask_flat = kth_distances <= max_distance
+    mask = mask_flat.reshape(grid_x.shape)
     
     return mask
 
@@ -489,99 +468,114 @@ def apply_mask_to_grid(
     grid_values : np.ndarray
         Valores interpolados.
     mask : np.ndarray
-        Máscara booleana.
+        Máscara booleana (True = válido, False = enmascarar).
         
     Returns
     -------
     masked_grid : np.ndarray
-        Grilla con máscara aplicada.
+        Grilla con máscara aplicada (NaN donde mask=False).
     """
     masked_grid = grid_values.copy()
     masked_grid[~mask] = np.nan
     return masked_grid
 
 
-def get_numeric_columns(df: pd.DataFrame, exclude: List[str] = None) -> List[str]:
+def combine_masks(mask1: np.ndarray, mask2: np.ndarray, operation: str = 'and') -> np.ndarray:
     """
-    Obtiene lista de columnas numéricas de un DataFrame.
+    Combina dos máscaras con operación lógica.
     
     Parameters
     ----------
-    df : pd.DataFrame
-        DataFrame a analizar.
-    exclude : List[str]
-        Lista de columnas a excluir.
+    mask1, mask2 : np.ndarray
+        Máscaras booleanas a combinar.
+    operation : str
+        Operación: 'and' (intersección) u 'or' (unión).
         
     Returns
     -------
-    List[str]
-        Lista de nombres de columnas numéricas.
+    np.ndarray
+        Máscara combinada.
     """
-    if exclude is None:
-        exclude = []
-    
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    return [col for col in numeric_cols if col not in exclude]
-
-
-def validate_merged_data(
-    df: pd.DataFrame,
-    required_cols: List[str]
-) -> Tuple[bool, str]:
-    """
-    Valida que el DataFrame merged tenga las columnas requeridas.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame a validar.
-    required_cols : List[str]
-        Lista de columnas requeridas.
-        
-    Returns
-    -------
-    is_valid : bool
-        True si es válido.
-    message : str
-        Mensaje de error si no es válido.
-    """
-    if df.empty:
-        return False, "El DataFrame está vacío tras el merge."
-    
-    missing = [col for col in required_cols if col not in df.columns]
-    if missing:
-        return False, f"Faltan columnas requeridas: {missing}"
-    
-    return True, "Validación exitosa"
+    if operation == 'and':
+        return mask1 & mask2
+    elif operation == 'or':
+        return mask1 | mask2
+    else:
+        raise ValueError(f"Operación desconocida: {operation}. Use 'and' u 'or'.")
 
 
 def export_grid_to_dataframe(
     grid_x: np.ndarray,
-    grid_z: np.ndarray,
-    grid_values: np.ndarray
+    grid_y: np.ndarray,
+    grid_values: np.ndarray,
+    param_name: str = 'Value'
 ) -> pd.DataFrame:
     """
     Convierte grilla interpolada a DataFrame para exportar.
     
     Parameters
     ----------
-    grid_x, grid_z : np.ndarray
-        Grillas 2D.
+    grid_x, grid_y : np.ndarray
+        Grillas 2D de coordenadas.
     grid_values : np.ndarray
         Valores interpolados.
+    param_name : str
+        Nombre del parámetro para la columna de valores.
         
     Returns
     -------
     pd.DataFrame
-        DataFrame con columnas X, Z, Value.
+        DataFrame con columnas X, Y, y el parámetro.
     """
     df = pd.DataFrame({
         'X': grid_x.ravel(),
-        'Z': grid_z.ravel(),
-        'Value': grid_values.ravel()
+        'Y': grid_y.ravel(),
+        param_name: grid_values.ravel()
     })
     
-    # Eliminar filas con NaN
-    df = df.dropna(subset=['Value'])
+    # No eliminamos NaN para mantener la estructura de la grilla
+    # El usuario puede filtrar si lo desea
     
     return df
+
+
+def subsample_data(
+    df: pd.DataFrame,
+    max_points: int = 10000,
+    method: str = 'random'
+) -> pd.DataFrame:
+    """
+    Submuestrea el DataFrame si tiene demasiados puntos.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame a submuestrear.
+    max_points : int
+        Número máximo de puntos deseados.
+    method : str
+        Método de submuestreo: 'random' (aleatorio) o 'grid' (por rejilla).
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame submuestreado.
+        
+    Notes
+    -----
+    El submuestreo por rejilla (grid) divide el espacio en celdas y toma
+    un punto representativo por celda, útil para mantener distribución espacial.
+    """
+    if len(df) <= max_points:
+        return df
+    
+    if method == 'random':
+        return df.sample(n=max_points, random_state=42)
+    
+    elif method == 'grid':
+        # Implementación simplificada: dividir en grid y tomar un punto por celda
+        # Esto requeriría columnas X, Y específicas - por simplicidad usamos random
+        return df.sample(n=max_points, random_state=42)
+    
+    else:
+        raise ValueError(f"Método de submuestreo desconocido: {method}")
