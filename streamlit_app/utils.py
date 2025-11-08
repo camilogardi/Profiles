@@ -1126,7 +1126,7 @@ def plot_contour_between_id_minmax(
     ax.set_ylabel(y_col)
     ax.set_title(title)
     plt.colorbar(cf, ax=ax, label=z_col)
-    ax.legend(loc='upper right')
+    
 
     plt.tight_layout()
     return fig, ax, poly
