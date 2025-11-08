@@ -42,7 +42,7 @@ st.set_page_config(
 )
 
 # Título y descripción
-st.title("🗺️ Interpolación 2D por Sondeos - Desarrollado po Camilo Garcia")
+st.title("🗺️ Interpolación 2D por Sondeos - Camilo Garcia")
 st.markdown("""
 Esta aplicación genera **mapas de contorno** de parámetros geotécnicos limitados
 por un **polígono envolvente** basado en las cotas mínimas y máximas de cada sondeo.
