@@ -1,9 +1,16 @@
 """
-Funciones auxiliares para validación de entrada y helpers de UI.
+Funciones auxiliares para validación de entrada y helpers de UI para interpolación 2D.
+Provee interfaces de usuario para:
+- Validación de archivos subidos
+- Mapeo de columnas X, Y
+- Selección múltiple de parámetros a interpolar
+- Configuración de interpolación y visualización
+- Estadísticas y validaciones
 """
 
 import pandas as pd
 import streamlit as st
+import numpy as np
 from typing import List, Tuple, Dict, Optional
 
 
@@ -24,52 +31,9 @@ def validate_file_uploaded(file_obj, file_label: str) -> bool:
         True si el archivo existe, False en caso contrario.
     """
     if file_obj is None:
-        st.warning(f"Por favor, sube el archivo: {file_label}")
+        st.info(f"👆 Por favor, sube el archivo: {file_label}")
         return False
     return True
-
-
-def create_column_mapping_ui(
-    df: pd.DataFrame,
-    mapping_config: List[Tuple[str, str, str]],
-    form_key: str = "column_mapping"
-) -> Dict[str, str]:
-    """
-    Crea UI para mapear columnas del DataFrame a variables requeridas.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame con columnas a mapear.
-    mapping_config : List[Tuple[str, str, str]]
-        Lista de tuplas: (variable_name, label_description, default_col_index).
-    form_key : str
-        Clave única para el formulario.
-        
-    Returns
-    -------
-    Dict[str, str]
-        Diccionario con mapeo variable_name -> nombre_columna_seleccionada.
-    """
-    cols = df.columns.tolist()
-    mapping = {}
-    
-    for var_name, label, default_idx in mapping_config:
-        if isinstance(default_idx, int):
-            idx = min(default_idx, len(cols) - 1) if len(cols) > 0 else 0
-        else:
-            # Buscar por nombre
-            idx = cols.index(default_idx) if default_idx in cols else 0
-        
-        selected = st.selectbox(
-            label,
-            options=cols,
-            index=idx,
-            key=f"{form_key}_{var_name}"
-        )
-        mapping[var_name] = selected
-    
-    return mapping
 
 
 def show_data_preview(df: pd.DataFrame, title: str = "Vista previa de datos", n_rows: int = 10):
@@ -86,244 +50,215 @@ def show_data_preview(df: pd.DataFrame, title: str = "Vista previa de datos", n_
         Número de filas a mostrar.
     """
     st.subheader(title)
-    st.dataframe(df.head(n_rows))
+    st.dataframe(df.head(n_rows), use_container_width=True)
     st.caption(f"Total de filas: {len(df)}, Total de columnas: {len(df.columns)}")
 
 
-def show_validation_message(is_valid: bool, message: str):
-    """
-    Muestra mensaje de validación.
-    
-    Parameters
-    ----------
-    is_valid : bool
-        Si la validación fue exitosa.
-    message : str
-        Mensaje a mostrar.
-    """
-    if is_valid:
-        st.success(message)
-    else:
-        st.error(message)
-
-
-def show_borehole_summary(
-    borehole_bounds: pd.DataFrame,
-    id_col: str,
-    show_n: int = 20
-):
-    """
-    Muestra resumen de límites verticales de sondeos.
-    
-    Parameters
-    ----------
-    borehole_bounds : pd.DataFrame
-        DataFrame con información de límites de sondeos.
-    id_col : str
-        Nombre de columna con ID.
-    show_n : int
-        Número máximo de filas a mostrar.
-    """
-    st.subheader("Resumen de sondeos")
-    
-    # Mostrar estadísticas generales
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total de sondeos", len(borehole_bounds))
-    with col2:
-        st.metric("Z máximo (cota más alta)", f"{borehole_bounds['z_top'].max():.2f}")
-    with col3:
-        st.metric("Z mínimo (fondo más bajo)", f"{borehole_bounds['z_bottom'].min():.2f}")
-    
-    # Tabla detallada
-    st.dataframe(
-        borehole_bounds.head(show_n),
-        use_container_width=True
-    )
-    
-    if len(borehole_bounds) > show_n:
-        st.caption(f"Mostrando {show_n} de {len(borehole_bounds)} sondeos")
-
-
-def show_missing_ids_warning(missing_ids: List[str]):
-    """
-    Muestra advertencia sobre IDs sin coincidencia.
-    
-    Parameters
-    ----------
-    missing_ids : List[str]
-        Lista de IDs que no tienen coincidencia.
-    """
-    if missing_ids:
-        st.warning(
-            f"⚠️ Se encontraron {len(missing_ids)} IDs en el archivo de ensayos "
-            f"que no existen en el archivo de cabeceras. Estos registros serán ignorados."
-        )
-        with st.expander("Ver IDs sin coincidencia"):
-            st.write(missing_ids)
-
-
-def validate_numeric_data(
+def create_column_mapping_ui(
     df: pd.DataFrame,
-    columns: List[str]
-) -> Tuple[pd.DataFrame, int]:
+    default_x_col: Optional[str] = None,
+    default_y_col: Optional[str] = None
+) -> Tuple[str, str]:
     """
-    Valida que las columnas especificadas sean numéricas y elimina filas con valores no válidos.
+    Crea UI para mapear columnas X e Y del DataFrame.
     
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame a validar.
-    columns : List[str]
-        Lista de columnas que deben ser numéricas.
+        DataFrame con columnas a mapear.
+    default_x_col : Optional[str]
+        Nombre de columna por defecto para X.
+    default_y_col : Optional[str]
+        Nombre de columna por defecto para Y.
         
     Returns
     -------
-    df_clean : pd.DataFrame
-        DataFrame con solo filas válidas.
-    n_removed : int
-        Número de filas eliminadas.
+    x_col, y_col : Tuple[str, str]
+        Nombres de columnas seleccionadas para X e Y.
     """
-    df_clean = df.copy()
-    original_len = len(df_clean)
+    cols = df.columns.tolist()
     
-    for col in columns:
-        if col in df_clean.columns:
-            df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+    # Intentar detectar automáticamente columnas X e Y
+    x_candidates = [c for c in cols if any(k in c.lower() for k in ['x', 'abscisa', 'este', 'easting'])]
+    y_candidates = [c for c in cols if any(k in c.lower() for k in ['y', 'cota', 'elevacion', 'norte', 'northing', 'elevation'])]
     
-    df_clean = df_clean.dropna(subset=columns)
-    n_removed = original_len - len(df_clean)
+    # Índices por defecto
+    x_idx = 0
+    y_idx = min(1, len(cols) - 1)
     
-    return df_clean, n_removed
+    if default_x_col and default_x_col in cols:
+        x_idx = cols.index(default_x_col)
+    elif x_candidates:
+        x_idx = cols.index(x_candidates[0])
+    
+    if default_y_col and default_y_col in cols:
+        y_idx = cols.index(default_y_col)
+    elif y_candidates:
+        y_idx = cols.index(y_candidates[0])
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        x_col = st.selectbox(
+            "🔹 Columna: X (Abscisa)",
+            options=cols,
+            index=x_idx,
+            help="Selecciona la columna que contiene las coordenadas X (abscisa, este)"
+        )
+    
+    with col2:
+        y_col = st.selectbox(
+            "🔹 Columna: Y (Cota / Elevación)",
+            options=cols,
+            index=y_idx,
+            help="Selecciona la columna que contiene las coordenadas Y (cota, elevación)"
+        )
+    
+    return x_col, y_col
 
 
-def check_grid_resolution_warning(nx: int, nz: int, threshold: int = 500000):
+def create_parameter_selection_ui(
+    available_params: List[str]
+) -> List[str]:
+    """
+    Crea UI para seleccionar parámetros a interpolar.
+    
+    Parameters
+    ----------
+    available_params : List[str]
+        Lista de parámetros disponibles.
+        
+    Returns
+    -------
+    List[str]
+        Lista de parámetros seleccionados.
+    """
+    st.subheader("📊 Selección de parámetros")
+    
+    if not available_params:
+        st.error("❌ No se encontraron parámetros numéricos disponibles")
+        return []
+    
+    selected = st.multiselect(
+        "Selecciona uno o más parámetros a interpolar:",
+        options=available_params,
+        default=[available_params[0]] if available_params else [],
+        help="Puedes seleccionar múltiples parámetros. Se generará un gráfico por cada uno."
+    )
+    
+    return selected
+
+
+def show_statistics_table(stats_df: pd.DataFrame):
+    """
+    Muestra tabla de estadísticas de parámetros.
+    
+    Parameters
+    ----------
+    stats_df : pd.DataFrame
+        DataFrame con estadísticas.
+    """
+    st.subheader("📈 Estadísticas de parámetros seleccionados")
+    
+    # Formatear números
+    formatted_df = stats_df.copy()
+    for col in ['Mínimo', 'Máximo', 'Media', 'Desv.Est.']:
+        if col in formatted_df.columns:
+            formatted_df[col] = formatted_df[col].apply(lambda x: f"{x:.3f}" if pd.notna(x) else "N/A")
+    
+    st.dataframe(formatted_df, use_container_width=True, hide_index=True)
+
+
+def show_validation_warnings(warnings: Dict[str, str]):
+    """
+    Muestra advertencias de validación.
+    
+    Parameters
+    ----------
+    warnings : Dict[str, str]
+        Diccionario con advertencias.
+    """
+    if warnings:
+        for key, msg in warnings.items():
+            st.warning(f"⚠️ {msg}")
+
+
+def check_grid_resolution_warning(nx: int, ny: int, threshold: int = 1000000):
     """
     Verifica si la resolución de grilla es muy alta y muestra advertencia.
     
     Parameters
     ----------
-    nx, nz : int
+    nx, ny : int
         Resolución de grilla.
     threshold : int
         Umbral para mostrar advertencia.
     """
-    total_points = nx * nz
+    total_points = nx * ny
     if total_points > threshold:
         st.warning(
-            f"⚠️ La resolución de grilla es alta ({nx} x {nz} = {total_points:,} puntos). "
+            f"⚠️ La resolución de grilla es alta ({nx} x {ny} = {total_points:,} puntos). "
             f"Esto puede consumir mucha memoria y tiempo de cómputo. "
             f"Considera reducir la resolución para previsualizaciones rápidas."
         )
 
 
-def get_interpolation_method_description(method: str) -> str:
+def create_interpolation_config_ui() -> Dict:
     """
-    Retorna descripción del método de interpolación.
+    Crea UI de configuración de interpolación y visualización en sidebar.
     
-    Parameters
-    ----------
-    method : str
-        Nombre del método.
-        
-    Returns
-    -------
-    str
-        Descripción del método.
-    """
-    descriptions = {
-        'griddata_linear': 'Interpolación lineal (rápida, suave)',
-        'griddata_nearest': 'Vecino más cercano (preserva valores discretos)',
-        'griddata_cubic': 'Interpolación cúbica (muy suave, puede sobrepasar)',
-        'rbf': 'Función de Base Radial (suave, buena para datos dispersos)',
-        'idw': 'Ponderación por Distancia Inversa (promedio ponderado, sin sobrepaso)'
-    }
-    return descriptions.get(method, method)
-
-
-def create_sidebar_configuration(
-    param_columns: List[str],
-    x_min: float,
-    x_max: float,
-    z_min: float,
-    z_max: float
-) -> Dict:
-    """
-    Crea UI de configuración en sidebar y retorna parámetros seleccionados.
-    
-    Parameters
-    ----------
-    param_columns : List[str]
-        Lista de columnas de parámetros disponibles.
-    x_min, x_max : float
-        Rango de posiciones X.
-    z_min, z_max : float
-        Rango de elevaciones Z.
-        
     Returns
     -------
     Dict
         Diccionario con configuración seleccionada.
     """
-    st.sidebar.subheader("⚙️ Configuración de perfil")
+    st.sidebar.header("⚙️ Configuración")
     
     config = {}
     
-    # Selección de parámetro
-    config['param_col'] = st.sidebar.selectbox(
-        "Parámetro a graficar",
-        options=param_columns,
-        help="Selecciona la columna del parámetro geotécnico a visualizar"
-    )
-    
-    # Método de ordenación
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📊 Ordenación de sondeos (eje X)")
-    config['order_method'] = st.sidebar.radio(
-        "Método de ordenación",
-        options=['x', 'xy_sort', 'pca'],
-        format_func=lambda x: {
-            'x': 'Coordenada X real',
-            'xy_sort': 'Ordenar por X, luego Y',
-            'pca': 'Proyección PCA (eje principal)'
-        }[x],
-        help="PCA es útil para transectos oblicuos"
-    )
-    
-    # Configuración de grilla
-    st.sidebar.markdown("---")
+    # Resolución de grilla
     st.sidebar.subheader("🔲 Resolución de grilla")
     config['nx'] = st.sidebar.number_input(
         "Puntos en X",
         min_value=20,
-        max_value=1000,
-        value=min(200, 200),
+        max_value=500,
+        value=100,
         step=10,
-        help="Resolución horizontal"
+        help="Resolución horizontal de la grilla"
     )
-    config['nz'] = st.sidebar.number_input(
-        "Puntos en Z",
+    config['ny'] = st.sidebar.number_input(
+        "Puntos en Y",
         min_value=20,
-        max_value=1000,
-        value=min(200, 200),
+        max_value=500,
+        value=100,
         step=10,
-        help="Resolución vertical"
+        help="Resolución vertical de la grilla"
     )
     
     # Método de interpolación
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🎨 Interpolación")
+    st.sidebar.subheader("🎨 Método de interpolación")
+    
+    interp_options = {
+        'griddata_linear': 'Griddata - Linear (rápida, suave)',
+        'griddata_nearest': 'Griddata - Nearest (preserva valores)',
+        'griddata_cubic': 'Griddata - Cubic (muy suave)',
+        'rbf': 'RBF - Radial Basis Function',
+        'idw': 'IDW - Inverse Distance Weighting'
+    }
+    
     config['interp_method'] = st.sidebar.selectbox(
         "Método",
-        options=['griddata_linear', 'griddata_nearest', 'griddata_cubic', 'rbf', 'idw'],
-        format_func=get_interpolation_method_description
+        options=list(interp_options.keys()),
+        format_func=lambda x: interp_options[x],
+        index=0
     )
     
     # Parámetros específicos según método
     if config['interp_method'] == 'rbf':
         config['rbf_func'] = st.sidebar.selectbox(
             "Función RBF",
-            options=['multiquadric', 'inverse', 'gaussian', 'linear', 'cubic', 'quintic']
+            options=['multiquadric', 'inverse', 'gaussian', 'linear', 'cubic', 'quintic', 'thin_plate'],
+            help="Función de base radial para interpolación"
         )
     
     if config['interp_method'] == 'idw':
@@ -332,13 +267,40 @@ def create_sidebar_configuration(
             min_value=0.5,
             max_value=5.0,
             value=2.0,
-            step=0.5
+            step=0.5,
+            help="Mayor potencia = más peso a puntos cercanos"
         )
     
-    # Opciones de visualización
-    st.sidebar.markdown("---")
+    # Enmascaramiento
+    st.sidebar.subheader("🔍 Enmascaramiento")
+    st.sidebar.caption("Evita extrapolación fuera del dominio de datos")
+    
+    config['mask_method'] = st.sidebar.radio(
+        "Método de máscara",
+        options=['none', 'convexhull', 'distance', 'both'],
+        format_func=lambda x: {
+            'none': 'Sin máscara',
+            'convexhull': 'ConvexHull (envolvente)',
+            'distance': 'Por distancia',
+            'both': 'Ambos (combinados)'
+        }[x],
+        help="ConvexHull: enmascara fuera del polígono convexo.\nDistancia: enmascara celdas lejanas a puntos de datos."
+    )
+    
+    if config['mask_method'] in ['distance', 'both']:
+        config['max_distance'] = st.sidebar.number_input(
+            "Distancia máxima",
+            min_value=0.0,
+            value=0.0,
+            help="0 = automático (basado en distribución de puntos)"
+        )
+        if config['max_distance'] == 0.0:
+            config['max_distance'] = None
+    
+    # Visualización
     st.sidebar.subheader("🎨 Visualización")
-    config['n_levels'] = st.sidebar.number_input(
+    
+    config['n_levels'] = st.sidebar.slider(
         "Niveles de contorno",
         min_value=5,
         max_value=50,
@@ -346,45 +308,139 @@ def create_sidebar_configuration(
         step=1
     )
     
-    # Colormap
-    from matplotlib import pyplot as plt
-    colormaps = sorted([m for m in plt.colormaps()])
-    default_cmap = 'viridis' if 'viridis' in colormaps else colormaps[0]
+    # Colormap con opciones comunes
+    common_cmaps = ['viridis', 'plasma', 'inferno', 'magma', 'cividis', 
+                    'coolwarm', 'RdYlBu_r', 'RdBu_r', 'seismic', 'jet']
     config['cmap'] = st.sidebar.selectbox(
         "Mapa de colores",
-        options=colormaps,
-        index=colormaps.index(default_cmap)
+        options=common_cmaps,
+        index=0
     )
     
-    # Opciones de máscara
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 Enmascaramiento")
-    config['apply_mask'] = st.sidebar.checkbox(
-        "Aplicar máscara vertical",
+    config['show_points'] = st.sidebar.checkbox(
+        "Mostrar puntos de datos",
         value=True,
-        help="Enmascara zonas sin cobertura vertical real"
+        help="Overlay de puntos de muestreo originales"
     )
     
-    if config['apply_mask']:
-        config['max_h_distance'] = st.sidebar.number_input(
-            "Distancia horizontal máxima",
-            min_value=0.0,
-            value=0.0,
-            help="0 = automático (1.5x distancia al sondeo más cercano)"
-        )
-        if config['max_h_distance'] == 0.0:
-            config['max_h_distance'] = None
-    
-    # Opciones de anotación
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📝 Anotaciones")
-    config['show_borehole_labels'] = st.sidebar.checkbox(
-        "Mostrar etiquetas de sondeos",
-        value=True
+    config['invert_yaxis'] = st.sidebar.checkbox(
+        "Invertir eje Y",
+        value=False,
+        help="Útil para mostrar profundidad creciente hacia abajo"
     )
-    config['show_sample_points'] = st.sidebar.checkbox(
-        "Mostrar puntos de ensayo",
-        value=True
+    
+    config['show_labels'] = st.sidebar.checkbox(
+        "Mostrar etiquetas de puntos",
+        value=False,
+        help="Requiere columna 'id' en los datos"
     )
     
     return config
+
+
+def create_download_buttons(
+    fig,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    grid_values: np.ndarray,
+    param_name: str
+):
+    """
+    Crea botones de descarga para figura y datos.
+    
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        Figura a exportar.
+    grid_x, grid_y : np.ndarray
+        Grillas de coordenadas.
+    grid_values : np.ndarray
+        Valores interpolados.
+    param_name : str
+        Nombre del parámetro.
+    """
+    from io import BytesIO
+    import pandas as pd
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📥 Descargar figura")
+        buf_img = BytesIO()
+        fig.savefig(buf_img, format='png', dpi=300, bbox_inches='tight')
+        buf_img.seek(0)
+        
+        st.download_button(
+            label="💾 Descargar PNG",
+            data=buf_img,
+            file_name=f"contorno_{param_name}.png",
+            mime="image/png",
+            use_container_width=True
+        )
+    
+    with col2:
+        st.subheader("📥 Descargar grilla CSV")
+        
+        # Crear DataFrame con grilla
+        df_export = pd.DataFrame({
+            'X': grid_x.ravel(),
+            'Y': grid_y.ravel(),
+            param_name: grid_values.ravel()
+        })
+        
+        csv_buffer = BytesIO()
+        df_export.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+        
+        st.download_button(
+            label="💾 Descargar CSV",
+            data=csv_buffer,
+            file_name=f"grilla_{param_name}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+
+def show_progress_info(param_name: str, current: int, total: int):
+    """
+    Muestra información de progreso para múltiples parámetros.
+    
+    Parameters
+    ----------
+    param_name : str
+        Nombre del parámetro actual.
+    current : int
+        Número de parámetro actual.
+    total : int
+        Total de parámetros.
+    """
+    st.info(f"🔄 Procesando parámetro {current}/{total}: **{param_name}**")
+
+
+def show_error_message(message: str, details: Optional[str] = None):
+    """
+    Muestra mensaje de error con detalles opcionales.
+    
+    Parameters
+    ----------
+    message : str
+        Mensaje de error principal.
+    details : Optional[str]
+        Detalles adicionales del error.
+    """
+    st.error(f"❌ {message}")
+    if details:
+        with st.expander("Ver detalles del error"):
+            st.code(details)
+
+
+def show_success_message(message: str):
+    """
+    Muestra mensaje de éxito.
+    
+    Parameters
+    ----------
+    message : str
+        Mensaje de éxito.
+    """
+    st.success(f"✅ {message}")
