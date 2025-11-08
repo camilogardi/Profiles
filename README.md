@@ -1,8 +1,44 @@
 # Interpolación 2D de Parámetros Geotécnicos
 
-Una aplicación Streamlit para generar **mapas de contorno 2D** (interpolación espacial) de parámetros geotécnicos a partir de datos de sondeos o mediciones puntuales.
+Una colección de aplicaciones Streamlit para generar **mapas de contorno 2D** (interpolación espacial) de parámetros geotécnicos a partir de datos de sondeos o mediciones puntuales.
+
+## 🎯 Aplicaciones Disponibles
+
+### 1. Aplicación General (`app.py`)
+
+Interpolación 2D flexible con múltiples métodos y opciones de enmascaramiento.
+
+**Características:**
+- Múltiples métodos: Griddata (linear, nearest, cubic), RBF, IDW
+- Enmascaramiento avanzado: ConvexHull, por distancia, o combinado
+- Selección múltiple de parámetros
+- Configuración completa de visualización
+
+```bash
+streamlit run streamlit_app/app.py
+```
+
+### 2. Aplicación por Sondeo (`app_contour_by_id.py`) ⭐ NUEVA
+
+Interpolación limitada por polígono min/max por ID de sondeo usando la función `plot_contour_between_id_minmax`.
+
+**Características:**
+- ✅ Polígono envolvente basado en cotas min/max por sondeo
+- ✅ Requiere columna ID (identificador de sondeo) - **OBLIGATORIO**
+- ✅ Límites opcionales de Y
+- ✅ Exportación PNG, CSV (grilla) y GeoJSON (polígono)
+- ✅ Botón "Cargar ejemplo" incluido
+- ✅ Soporte shapely con fallback a matplotlib.path
+
+```bash
+streamlit run streamlit_app/app_contour_by_id.py
+```
+
+**📚 Documentación completa:** Ver [README_CONTOUR_BY_ID.md](README_CONTOUR_BY_ID.md)
 
 ## 🎯 Características Principales
+
+### Aplicación General (app.py)
 
 - **Entrada de una sola tabla:**
   - Archivo único CSV o Excel con coordenadas (X, Y) y múltiples columnas de parámetros medidos
@@ -35,6 +71,30 @@ Una aplicación Streamlit para generar **mapas de contorno 2D** (interpolación 
   - Figuras PNG de alta resolución (300 dpi)
   - Grilla interpolada en formato CSV (X, Y, Value)
 
+### Aplicación por Sondeo (app_contour_by_id.py) ⭐
+
+- **Polígono envolvente por sondeo:**
+  - Agrupa datos por ID de sondeo
+  - Calcula cotas min/max por cada sondeo
+  - Construye polígono uniendo min/max ordenados por X
+  - Interpola solo dentro del polígono
+
+- **Requisitos específicos:**
+  - Columna ID (identificador de sondeo) - **OBLIGATORIO**
+  - Al menos 2 sondeos únicos
+  - Al menos 3 puntos válidos totales
+
+- **Configuración específica:**
+  - Límites opcionales de Y (y_limits)
+  - Método de interpolación: cubic (preferido) o linear
+  - Clip al rango de datos (evita overshoot)
+  - Exportación de polígono como GeoJSON
+
+- **Botón de ejemplo:**
+  - Carga `streamlit_app/examples/example_table.csv`
+  - 10 sondeos con múltiples parámetros
+  - Ideal para probar funcionalidad
+
 ## 📋 Requisitos
 
 ### Dependencias
@@ -52,6 +112,7 @@ Dependencias principales:
 - matplotlib >= 3.7.0
 - openpyxl >= 3.0.0 (para soporte de Excel .xlsx)
 - xlrd >= 2.0.1 (para soporte de Excel .xls)
+- shapely >= 2.0.0 (recomendado para app_contour_by_id.py, tiene fallback)
 
 ## 🚀 Instalación y Ejecución
 
@@ -80,24 +141,36 @@ source .venv/bin/activate
 pip install -r streamlit_app/requirements.txt
 ```
 
-### 4. Ejecutar la aplicación
+### 4. Ejecutar las aplicaciones
 
+**Aplicación general (interpolación flexible):**
 ```bash
 streamlit run streamlit_app/app.py
+```
+
+**Aplicación por sondeo (polígono min/max por ID):**
+```bash
+streamlit run streamlit_app/app_contour_by_id.py
 ```
 
 La aplicación se abrirá en `http://localhost:8501`
 
 ### 5. Ejecutar pruebas (opcional)
 
-Para verificar que la funcionalidad de lectura de archivos funciona correctamente:
+Para verificar que todas las funcionalidades funcionan correctamente:
 
 ```bash
-# Las dependencias de testing ya están en requirements.txt
+# Instalar pytest si no está instalado
 pip install pytest
 
-# Ejecutar pruebas de lectura de archivos
-pytest -q streamlit_app/tests/test_read_table.py
+# Ejecutar todas las pruebas
+pytest -v streamlit_app/tests/
+
+# Ejecutar solo pruebas de lectura de archivos
+pytest -v streamlit_app/tests/test_read_table.py
+
+# Ejecutar solo pruebas de plot_contour_between_id_minmax
+pytest -v streamlit_app/tests/test_plot_contour_between_id_minmax.py
 ```
 
 Salida esperada:

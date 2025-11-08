@@ -1043,29 +1043,34 @@ def plot_contour_between_id_minmax(
     else:
         Zi = griddata(points, z, (Xi, Yi), method='linear')
 
-    # 3) máscara: usar shapely.vectorized.contains si está disponible; si no, usar matplotlib.path.Path
+    # 3) máscara: usar shapely.contains_xy si está disponible (shapely >= 2.0); si no, usar matplotlib.path.Path
     mask_inside = None
     if SHAPELY_AVAILABLE:
         try:
-            # preferir shapely.vectorized (si la versión instalada lo tiene)
-            from shapely import vectorized
-            mask_inside = vectorized.contains(poly, Xi, Yi)
-        except Exception:
-            # fallback con matplotlib.path.Path
-            from matplotlib.path import Path
-            if poly.geom_type == 'Polygon':
-                path = Path(list(poly.exterior.coords))
-                pts = np.column_stack((Xi.ravel(), Yi.ravel()))
-                mask_flat = path.contains_points(pts)
-                mask_inside = mask_flat.reshape(Xi.shape)
-            else:
-                # MultiPolygon: unir máscaras
-                mask_flat = np.zeros(Xi.size, dtype=bool)
-                pts = np.column_stack((Xi.ravel(), Yi.ravel()))
-                for p in poly.geoms:
-                    path = Path(list(p.exterior.coords))
-                    mask_flat |= path.contains_points(pts)
-                mask_inside = mask_flat.reshape(Xi.shape)
+            # preferir shapely.contains_xy (shapely >= 2.0)
+            from shapely import contains_xy
+            mask_inside = contains_xy(poly, Xi, Yi)
+        except (ImportError, AttributeError):
+            try:
+                # fallback a shapely.vectorized.contains (shapely < 2.0, deprecated)
+                from shapely import vectorized
+                mask_inside = vectorized.contains(poly, Xi, Yi)
+            except Exception:
+                # fallback con matplotlib.path.Path
+                from matplotlib.path import Path
+                if poly.geom_type == 'Polygon':
+                    path = Path(list(poly.exterior.coords))
+                    pts = np.column_stack((Xi.ravel(), Yi.ravel()))
+                    mask_flat = path.contains_points(pts)
+                    mask_inside = mask_flat.reshape(Xi.shape)
+                else:
+                    # MultiPolygon: unir máscaras
+                    mask_flat = np.zeros(Xi.size, dtype=bool)
+                    pts = np.column_stack((Xi.ravel(), Yi.ravel()))
+                    for p in poly.geoms:
+                        path = Path(list(p.exterior.coords))
+                        mask_flat |= path.contains_points(pts)
+                    mask_inside = mask_flat.reshape(Xi.shape)
     else:
         # usar matplotlib.path.Path directamente
         from matplotlib.path import Path
