@@ -16,13 +16,18 @@ Extensiones posibles:
 import pandas as pd
 import numpy as np
 from scipy.interpolate import griddata, Rbf
-from scipy.spatial import ConvexHull, distance
+from scipy.spatial import ConvexHull, cKDTree, distance
 from typing import Tuple, List, Optional, Dict, Union
 
 
 def read_file(file_obj) -> pd.DataFrame:
     """
     Lee un archivo CSV o Excel y retorna un DataFrame.
+    
+    Detecta la extensión del archivo y utiliza el motor apropiado:
+    - .csv: pandas.read_csv
+    - .xlsx: pandas.read_excel con engine='openpyxl'
+    - .xls: pandas.read_excel con engine='xlrd'
     
     Parameters
     ----------
@@ -38,14 +43,39 @@ def read_file(file_obj) -> pd.DataFrame:
     ------
     ValueError
         Si el tipo de archivo no es soportado.
+    ImportError
+        Si falta una dependencia necesaria para leer el archivo (openpyxl o xlrd).
     """
     file_name = file_obj.name.lower()
+    
     if file_name.endswith('.csv'):
         return pd.read_csv(file_obj)
-    elif file_name.endswith(('.xls', '.xlsx')):
-        return pd.read_excel(file_obj)
+    
+    elif file_name.endswith('.xlsx'):
+        try:
+            return pd.read_excel(file_obj, engine='openpyxl')
+        except ImportError:
+            raise ImportError(
+                "Para leer archivos .xlsx necesitas instalar openpyxl.\n"
+                "Ejecuta: pip install openpyxl\n\n"
+                "Alternativa: Exporta tu archivo a formato .csv y vuelve a subirlo."
+            )
+    
+    elif file_name.endswith('.xls'):
+        try:
+            return pd.read_excel(file_obj, engine='xlrd')
+        except ImportError:
+            raise ImportError(
+                "Para leer archivos .xls necesitas instalar xlrd.\n"
+                "Ejecuta: pip install xlrd\n\n"
+                "Alternativa: Exporta tu archivo a formato .csv o .xlsx y vuelve a subirlo."
+            )
+    
     else:
-        raise ValueError(f"Tipo de archivo no soportado: {file_name}. Use CSV o Excel.")
+        raise ValueError(
+            f"Tipo de archivo no soportado: {file_name}\n"
+            f"Formatos aceptados: .csv, .xlsx, .xls"
+        )
 
 
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
@@ -296,7 +326,8 @@ def idw_interpolate(
     values: np.ndarray,
     grid_x: np.ndarray,
     grid_y: np.ndarray,
-    power: float = 2.0
+    power: float = 2.0,
+    search_radius: Optional[float] = None
 ) -> np.ndarray:
     """
     Interpolación IDW (Inverse Distance Weighting) implementada de forma vectorizada.
@@ -304,6 +335,8 @@ def idw_interpolate(
     IDW es un método de interpolación ponderado por la distancia inversa que calcula
     valores interpolados como un promedio ponderado de los puntos conocidos, donde
     los pesos son inversamente proporcionales a la distancia elevada a una potencia.
+    
+    Utiliza scipy.spatial.cKDTree para búsquedas eficientes de vecinos.
     
     Parameters
     ----------
@@ -315,34 +348,81 @@ def idw_interpolate(
         Grillas 2D para interpolación.
     power : float
         Potencia para IDW. Valores típicos: 1-3. Mayor potencia = más peso a puntos cercanos.
+    search_radius : Optional[float]
+        Radio de búsqueda opcional. Si se especifica, solo se consideran puntos
+        dentro de este radio para la interpolación (mejora rendimiento en datasets grandes).
         
     Returns
     -------
     grid_values : np.ndarray
         Valores interpolados en la grilla.
+        
+    Notes
+    -----
+    La implementación usa scipy.spatial.cKDTree para cálculos eficientes de distancia,
+    especialmente útil para datasets grandes.
     """
     # Aplanar grilla
     grid_points = np.c_[grid_x.ravel(), grid_y.ravel()]
     
-    # Calcular distancias (vectorizado) - shape: (n_grid_points, n_data_points)
-    distances = distance.cdist(grid_points, points_xy, metric='euclidean')
+    # Crear KDTree para búsquedas eficientes
+    tree = cKDTree(points_xy)
     
-    # Evitar división por cero
-    epsilon = 1e-10
-    distances = np.maximum(distances, epsilon)
+    if search_radius is not None:
+        # Usar búsqueda por radio para mejorar eficiencia
+        # query_ball_point retorna índices de vecinos dentro del radio
+        weights_list = []
+        values_interp = []
+        
+        for point in grid_points:
+            indices = tree.query_ball_point(point, search_radius)
+            
+            if len(indices) == 0:
+                # No hay puntos dentro del radio
+                values_interp.append(np.nan)
+            else:
+                # Calcular distancias solo a puntos dentro del radio
+                dists = np.linalg.norm(points_xy[indices] - point, axis=1)
+                
+                # Evitar división por cero
+                epsilon = 1e-10
+                dists = np.maximum(dists, epsilon)
+                
+                # Calcular pesos
+                w = 1.0 / (dists ** power)
+                w_sum = np.sum(w)
+                w = w / w_sum
+                
+                # Interpolar
+                val = np.dot(w, values[indices])
+                values_interp.append(val)
+        
+        grid_values = np.array(values_interp).reshape(grid_x.shape)
     
-    # Calcular pesos: w = 1 / d^power
-    weights = 1.0 / (distances ** power)
-    
-    # Normalizar pesos
-    weights_sum = np.sum(weights, axis=1, keepdims=True)
-    weights = weights / weights_sum
-    
-    # Interpolar: valor = suma(w_i * value_i)
-    grid_values = np.dot(weights, values)
-    
-    # Reshape a forma de grilla
-    grid_values = grid_values.reshape(grid_x.shape)
+    else:
+        # Calcular distancias usando cKDTree (más eficiente que cdist para grandes datasets)
+        distances, _ = tree.query(grid_points, k=len(points_xy))
+        
+        # Si solo hay un punto, query retorna un escalar en lugar de array
+        if len(points_xy) == 1:
+            distances = distances.reshape(-1, 1)
+        
+        # Evitar división por cero
+        epsilon = 1e-10
+        distances = np.maximum(distances, epsilon)
+        
+        # Calcular pesos: w = 1 / d^power
+        weights = 1.0 / (distances ** power)
+        
+        # Normalizar pesos
+        weights_sum = np.sum(weights, axis=1, keepdims=True)
+        weights = weights / weights_sum
+        
+        # Interpolar: valor = suma(w_i * value_i)
+        grid_values = np.dot(weights, values)
+        
+        # Reshape a forma de grilla
+        grid_values = grid_values.reshape(grid_x.shape)
     
     return grid_values
 
@@ -411,6 +491,8 @@ def create_distance_mask(
     Crea máscara basada en distancia a los k vecinos más cercanos.
     Las celdas con distancia mayor al umbral se marcan como inválidas.
     
+    Utiliza scipy.spatial.cKDTree para búsquedas eficientes de k-vecinos más cercanos.
+    
     Parameters
     ----------
     points_xy : np.ndarray, shape (n, 2)
@@ -427,24 +509,38 @@ def create_distance_mask(
     -------
     mask : np.ndarray
         Máscara booleana (True = válido, False = muy lejos de datos).
+        
+    Notes
+    -----
+    Usa scipy.spatial.cKDTree para búsquedas eficientes de k-vecinos,
+    significativamente más rápido que cálculos de distancia completos para datasets grandes.
     """
     # Aplanar grilla
     grid_points = np.c_[grid_x.ravel(), grid_y.ravel()]
     
-    # Calcular distancias a todos los puntos de datos
-    distances = distance.cdist(grid_points, points_xy, metric='euclidean')
+    # Crear KDTree para búsquedas eficientes de k-vecinos
+    tree = cKDTree(points_xy)
     
-    # Distancia al k-ésimo vecino más cercano
+    # Consultar distancia al k-ésimo vecino más cercano
     k = min(k_neighbors, len(points_xy))
-    kth_distances = np.partition(distances, k-1, axis=1)[:, k-1]
+    kth_distances, _ = tree.query(grid_points, k=k)
+    
+    # Si k > 1, tomar la distancia máxima entre los k vecinos
+    if k > 1:
+        kth_distances = np.max(kth_distances, axis=1)
     
     # Determinar umbral
     if max_distance is None:
         # Calcular umbral automático: analizar distancias típicas entre puntos
         if len(points_xy) > 1:
-            pairwise_dist = distance.pdist(points_xy)
+            # Usar KDTree para calcular distancias entre vecinos
+            neighbor_distances, _ = tree.query(points_xy, k=min(2, len(points_xy)))
+            if len(points_xy) > 1:
+                # Tomar distancia al vecino más cercano (excluyendo el punto mismo)
+                neighbor_distances = neighbor_distances[:, 1] if neighbor_distances.ndim > 1 else neighbor_distances
+            
             # Usar percentil 90 de distancias como referencia
-            typical_distance = np.percentile(pairwise_dist, 90)
+            typical_distance = np.percentile(neighbor_distances, 90)
             max_distance = typical_distance * 1.5  # Factor de seguridad
         else:
             max_distance = np.inf  # Sin umbral si solo hay 1 punto
@@ -542,7 +638,9 @@ def export_grid_to_dataframe(
 def subsample_data(
     df: pd.DataFrame,
     max_points: int = 10000,
-    method: str = 'random'
+    method: str = 'random',
+    x_col: Optional[str] = None,
+    y_col: Optional[str] = None
 ) -> pd.DataFrame:
     """
     Submuestrea el DataFrame si tiene demasiados puntos.
@@ -554,7 +652,11 @@ def subsample_data(
     max_points : int
         Número máximo de puntos deseados.
     method : str
-        Método de submuestreo: 'random' (aleatorio) o 'grid' (por rejilla).
+        Método de submuestreo: 'random' (aleatorio) o 'grid' (por rejilla espacial).
+    x_col : Optional[str]
+        Nombre de columna X (requerido para método 'grid').
+    y_col : Optional[str]
+        Nombre de columna Y (requerido para método 'grid').
         
     Returns
     -------
@@ -564,7 +666,8 @@ def subsample_data(
     Notes
     -----
     El submuestreo por rejilla (grid) divide el espacio en celdas y toma
-    un punto representativo por celda, útil para mantener distribución espacial.
+    un punto representativo por celda, útil para mantener distribución espacial
+    uniforme en el dataset submuestreado.
     """
     if len(df) <= max_points:
         return df
@@ -573,9 +676,38 @@ def subsample_data(
         return df.sample(n=max_points, random_state=42)
     
     elif method == 'grid':
-        # Implementación simplificada: dividir en grid y tomar un punto por celda
-        # Esto requeriría columnas X, Y específicas - por simplicidad usamos random
-        return df.sample(n=max_points, random_state=42)
+        # Submuestreo espacial: dividir en grid y tomar puntos representativos
+        if x_col is None or y_col is None:
+            # Si no se especifican columnas, usar random
+            return df.sample(n=max_points, random_state=42)
+        
+        # Calcular número de celdas en cada dimensión
+        n_cells = int(np.sqrt(max_points))
+        
+        # Crear bins para X e Y
+        x_bins = pd.cut(df[x_col], bins=n_cells, labels=False)
+        y_bins = pd.cut(df[y_col], bins=n_cells, labels=False)
+        
+        # Agrupar por celda
+        df_temp = df.copy()
+        df_temp['_cell_x'] = x_bins
+        df_temp['_cell_y'] = y_bins
+        
+        # Tomar un punto aleatorio por celda
+        df_sampled = (df_temp
+                     .groupby(['_cell_x', '_cell_y'], dropna=False)
+                     .sample(n=1, random_state=42)
+                     .drop(columns=['_cell_x', '_cell_y']))
+        
+        # Si no llegamos a max_points, complementar con random
+        if len(df_sampled) < max_points:
+            remaining = max_points - len(df_sampled)
+            df_remaining = df[~df.index.isin(df_sampled.index)]
+            if len(df_remaining) > 0:
+                df_extra = df_remaining.sample(n=min(remaining, len(df_remaining)), random_state=42)
+                df_sampled = pd.concat([df_sampled, df_extra])
+        
+        return df_sampled.reset_index(drop=True)
     
     else:
-        raise ValueError(f"Método de submuestreo desconocido: {method}")
+        raise ValueError(f"Método de submuestreo desconocido: {method}. Use 'random' o 'grid'.")

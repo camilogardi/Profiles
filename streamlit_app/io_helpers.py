@@ -196,6 +196,29 @@ def check_grid_resolution_warning(nx: int, ny: int, threshold: int = 1000000):
     """
     total_points = nx * ny
     if total_points > threshold:
+        st.error(
+            f"⚠️ **¡ADVERTENCIA DE RESOLUCIÓN EXCESIVA!**\n\n"
+            f"La resolución de grilla es extremadamente alta ({nx} x {ny} = {total_points:,} puntos).\n"
+            f"Esto **excede el límite recomendado** de {threshold:,} puntos.\n\n"
+            f"**Consecuencias:**\n"
+            f"- Consumo excesivo de memoria RAM\n"
+            f"- Tiempo de cómputo muy largo\n"
+            f"- Posible fallo de la aplicación\n\n"
+            f"**Recomendación:** Reduce la resolución a valores más razonables:\n"
+            f"- Previsualización: 50×50 a 100×100\n"
+            f"- Uso general: 100×100 a 200×200\n"
+            f"- Alta calidad: 200×200 a 300×300"
+        )
+        
+        # Ofrecer confirmación
+        if not st.checkbox(
+            "⚠️ Entiendo los riesgos y quiero continuar de todos modos",
+            value=False,
+            help="Marca esta casilla solo si estás seguro de que tu sistema puede manejar esta resolución"
+        ):
+            st.stop()
+    
+    elif total_points > threshold * 0.5:
         st.warning(
             f"⚠️ La resolución de grilla es alta ({nx} x {ny} = {total_points:,} puntos). "
             f"Esto puede consumir mucha memoria y tiempo de cómputo. "
