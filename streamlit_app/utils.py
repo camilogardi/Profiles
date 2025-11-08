@@ -1100,10 +1100,7 @@ def plot_contour_between_id_minmax(
     fig, ax = plt.subplots(figsize=figsize)
     cf = ax.contourf(Xi, Yi, Zi_masked, levels=levels, cmap=cmap, extend='neither')
     cs = ax.contour(Xi, Yi, Zi_masked, levels=levels, colors='k', linewidths=0.5, alpha=0.6)
-    try:
-        ax.clabel(cs, inline=True, fontsize=8, fmt="%.2f")
-    except Exception:
-        pass
+    
 
     # polígono borde
     if SHAPELY_AVAILABLE and poly.geom_type == 'Polygon':
@@ -1120,8 +1117,7 @@ def plot_contour_between_id_minmax(
         yp = [p[1] for p in poly.points]
         ax.plot(xp, yp, color='k', linewidth=1.2, alpha=0.9, label='polígono (min/max por ID)')
 
-    # puntos originales
-    ax.scatter(x, y, c='k', s=scatter_size, alpha=0.8, edgecolors='white', linewidth=0.3)
+    
 
     # ejes y título
     if y_limits is not None:
