@@ -50,7 +50,8 @@ Dependencias principales:
 - numpy >= 1.24.0
 - scipy >= 1.10.0
 - matplotlib >= 3.7.0
-- openpyxl >= 3.1.0 (para soporte de Excel)
+- openpyxl >= 3.1.0 (para soporte de Excel .xlsx)
+- xlrd >= 2.0.1 (para soporte de Excel .xls)
 
 ## 🚀 Instalación y Ejecución
 

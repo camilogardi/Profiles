@@ -184,10 +184,29 @@ if n_points > 10000:
     st.warning(f"⚠️ El archivo contiene {n_points} puntos. Para mejor rendimiento, "
                f"se recomienda trabajar con menos de 10,000 puntos.")
     
-    if st.checkbox("Aplicar submuestreo aleatorio", value=False):
-        max_points = st.slider("Número máximo de puntos", 1000, 10000, 5000, 500)
-        df_clean = subsample_data(df_clean, max_points=max_points, method='random')
-        st.success(f"✅ Datos submuestreados a {len(df_clean)} puntos")
+    if st.checkbox("Aplicar submuestreo", value=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            subsample_method = st.radio(
+                "Método de submuestreo",
+                options=['random', 'grid'],
+                format_func=lambda x: {
+                    'random': 'Aleatorio (rápido)',
+                    'grid': 'Por rejilla espacial (mantiene distribución)'
+                }[x],
+                help="Aleatorio: selección aleatoria simple. Grid: divide en celdas y toma puntos representativos."
+            )
+        with col2:
+            max_points = st.slider("Número máximo de puntos", 1000, 10000, 5000, 500)
+        
+        df_clean = subsample_data(
+            df_clean, 
+            max_points=max_points, 
+            method=subsample_method,
+            x_col=x_col,
+            y_col=y_col
+        )
+        st.success(f"✅ Datos submuestreados a {len(df_clean)} puntos usando método '{subsample_method}'")
 
 # Sección 5: Configuración de interpolación
 st.header("⚙️ Paso 5: Configurar interpolación y visualización")

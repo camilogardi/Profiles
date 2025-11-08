@@ -12,6 +12,7 @@ matplotlib>=3.7.0
 
 # File format support
 openpyxl>=3.1.0
+xlrd>=2.0.1
 
 # Optional: Para kriging (descomentar si se necesita)
 # pykrige>=1.7.0
