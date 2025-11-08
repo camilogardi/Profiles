@@ -29,6 +29,7 @@ from io import BytesIO
 # Importar funciones de utils e io_helpers
 from utils import (
     read_file,
+    read_table,
     normalize_column_names,
     get_numeric_columns,
     validate_data_for_interpolation,
