@@ -50,7 +50,7 @@ Dependencias principales:
 - numpy >= 1.24.0
 - scipy >= 1.10.0
 - matplotlib >= 3.7.0
-- openpyxl >= 3.1.0 (para soporte de Excel .xlsx)
+- openpyxl >= 3.0.0 (para soporte de Excel .xlsx)
 - xlrd >= 2.0.1 (para soporte de Excel .xls)
 
 ## 🚀 Instalación y Ejecución
@@ -87,6 +87,25 @@ streamlit run streamlit_app/app.py
 ```
 
 La aplicación se abrirá en `http://localhost:8501`
+
+### 5. Ejecutar pruebas (opcional)
+
+Para verificar que la funcionalidad de lectura de archivos funciona correctamente:
+
+```bash
+# Las dependencias de testing ya están en requirements.txt
+pip install pytest
+
+# Ejecutar pruebas de lectura de archivos
+pytest -q streamlit_app/tests/test_read_table.py
+```
+
+Salida esperada:
+- **CSV**: Lectura exitosa
+- **XLSX**: Lectura exitosa (requiere openpyxl, incluido en requirements.txt)
+- **XLS**: Manejo apropiado con fallback a otros formatos
+
+Las pruebas verifican que `read_table()` puede leer archivos CSV y Excel desde memoria (BytesIO), resetea correctamente el puntero del archivo (seek), y proporciona mensajes de error claros si faltan dependencias.
 
 ## 📁 Formato del Archivo de Entrada
 

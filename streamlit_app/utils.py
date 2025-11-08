@@ -20,14 +20,155 @@ from scipy.spatial import ConvexHull, cKDTree, distance
 from typing import Tuple, List, Optional, Dict, Union
 
 
-def read_file(file_obj) -> pd.DataFrame:
+def read_table(filelike) -> pd.DataFrame:
     """
-    Lee un archivo CSV o Excel y retorna un DataFrame.
+    Lee un archivo CSV o Excel y retorna un DataFrame con manejo robusto de errores.
     
     Detecta la extensión del archivo y utiliza el motor apropiado:
     - .csv: pandas.read_csv
     - .xlsx: pandas.read_excel con engine='openpyxl'
     - .xls: pandas.read_excel con engine='xlrd'
+    
+    Si no se puede detectar la extensión o falla la lectura, intenta en orden:
+    1. Lectura como CSV
+    2. Lectura como XLSX (openpyxl)
+    3. Lectura como XLS (xlrd)
+    
+    Resetea el puntero del archivo (seek(0)) antes de cada intento de lectura
+    para asegurar compatibilidad con objetos file-like de Streamlit.
+    
+    Parameters
+    ----------
+    filelike : file-like object
+        Objeto de archivo con atributo .name y método .seek().
+        Compatible con streamlit.UploadedFile.
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame con los datos del archivo.
+        
+    Raises
+    ------
+    ValueError
+        Si el tipo de archivo no es soportado o no se puede leer.
+    ImportError
+        Si falta una dependencia necesaria para leer el archivo (openpyxl o xlrd).
+        El mensaje incluye instrucciones claras de instalación y alternativas.
+        
+    Examples
+    --------
+    >>> from io import BytesIO
+    >>> import pandas as pd
+    >>> # Crear CSV en memoria
+    >>> csv_data = "col1,col2\\n1,2\\n3,4"
+    >>> filelike = BytesIO(csv_data.encode())
+    >>> filelike.name = "test.csv"
+    >>> df = read_table(filelike)
+    >>> df.shape
+    (2, 2)
+    
+    Notes
+    -----
+    Para archivos .xlsx se requiere: pip install openpyxl>=3.0.0
+    Para archivos .xls se requiere: pip install xlrd>=2.0.1
+    Como alternativa, puedes exportar el archivo a CSV.
+    """
+    # Detectar extensión si existe atributo .name
+    extension = None
+    if hasattr(filelike, 'name') and filelike.name:
+        file_name = filelike.name.lower()
+        if file_name.endswith('.csv'):
+            extension = '.csv'
+        elif file_name.endswith('.xlsx'):
+            extension = '.xlsx'
+        elif file_name.endswith('.xls'):
+            extension = '.xls'
+    
+    # Intentar lectura basada en extensión detectada
+    if extension == '.csv':
+        if hasattr(filelike, 'seek'):
+            filelike.seek(0)
+        return pd.read_csv(filelike)
+    
+    elif extension == '.xlsx':
+        if hasattr(filelike, 'seek'):
+            filelike.seek(0)
+        try:
+            return pd.read_excel(filelike, engine='openpyxl')
+        except ImportError:
+            raise ImportError(
+                "Para leer archivos .xlsx necesitas instalar openpyxl.\n"
+                "Ejecuta: pip install openpyxl>=3.0.0\n\n"
+                "Alternativa: Exporta tu archivo a formato .csv y vuelve a subirlo."
+            )
+    
+    elif extension == '.xls':
+        if hasattr(filelike, 'seek'):
+            filelike.seek(0)
+        try:
+            return pd.read_excel(filelike, engine='xlrd')
+        except ImportError:
+            raise ImportError(
+                "Para leer archivos .xls necesitas instalar xlrd.\n"
+                "Ejecuta: pip install xlrd>=2.0.1\n\n"
+                "Alternativa: Exporta tu archivo a formato .csv o .xlsx y vuelve a subirlo."
+            )
+        except Exception:
+            # Si falla por otro motivo (archivo corrupto, etc.), intentar fallback
+            pass
+    
+    # Si no se detectó extensión o es desconocida, o falló lectura directa,
+    # intentar en orden con fallback
+    errors = []
+    
+    # Intento 1: CSV
+    try:
+        if hasattr(filelike, 'seek'):
+            filelike.seek(0)
+        return pd.read_csv(filelike)
+    except Exception as e:
+        errors.append(f"CSV: {str(e)}")
+    
+    # Intento 2: XLSX con openpyxl
+    try:
+        if hasattr(filelike, 'seek'):
+            filelike.seek(0)
+        return pd.read_excel(filelike, engine='openpyxl')
+    except ImportError:
+        errors.append("XLSX: falta instalar openpyxl (pip install openpyxl>=3.0.0)")
+    except Exception as e:
+        errors.append(f"XLSX: {str(e)}")
+    
+    # Intento 3: XLS con xlrd
+    try:
+        if hasattr(filelike, 'seek'):
+            filelike.seek(0)
+        return pd.read_excel(filelike, engine='xlrd')
+    except ImportError:
+        errors.append("XLS: falta instalar xlrd (pip install xlrd>=2.0.1)")
+    except Exception as e:
+        errors.append(f"XLS: {str(e)}")
+    
+    # Si todos los intentos fallaron, lanzar error detallado
+    file_name = filelike.name if hasattr(filelike, 'name') else 'archivo desconocido'
+    raise ValueError(
+        f"No se pudo leer el archivo '{file_name}'.\n\n"
+        f"Intentos realizados:\n" + "\n".join(f"  - {err}" for err in errors) + "\n\n"
+        f"Soluciones:\n"
+        f"  1. Para archivos .xlsx instala: pip install openpyxl>=3.0.0\n"
+        f"  2. Para archivos .xls instala: pip install xlrd>=2.0.1\n"
+        f"  3. Como alternativa, exporta el archivo a formato CSV.\n"
+        f"\nFormatos soportados: .csv, .xlsx, .xls"
+    )
+
+
+def read_file(file_obj) -> pd.DataFrame:
+    """
+    Lee un archivo CSV o Excel y retorna un DataFrame.
+    
+    Esta función es un wrapper de read_table() para mantener compatibilidad
+    con código existente.
     
     Parameters
     ----------
@@ -45,37 +186,12 @@ def read_file(file_obj) -> pd.DataFrame:
         Si el tipo de archivo no es soportado.
     ImportError
         Si falta una dependencia necesaria para leer el archivo (openpyxl o xlrd).
+        
+    See Also
+    --------
+    read_table : Función principal con manejo robusto de errores.
     """
-    file_name = file_obj.name.lower()
-    
-    if file_name.endswith('.csv'):
-        return pd.read_csv(file_obj)
-    
-    elif file_name.endswith('.xlsx'):
-        try:
-            return pd.read_excel(file_obj, engine='openpyxl')
-        except ImportError:
-            raise ImportError(
-                "Para leer archivos .xlsx necesitas instalar openpyxl.\n"
-                "Ejecuta: pip install openpyxl\n\n"
-                "Alternativa: Exporta tu archivo a formato .csv y vuelve a subirlo."
-            )
-    
-    elif file_name.endswith('.xls'):
-        try:
-            return pd.read_excel(file_obj, engine='xlrd')
-        except ImportError:
-            raise ImportError(
-                "Para leer archivos .xls necesitas instalar xlrd.\n"
-                "Ejecuta: pip install xlrd\n\n"
-                "Alternativa: Exporta tu archivo a formato .csv o .xlsx y vuelve a subirlo."
-            )
-    
-    else:
-        raise ValueError(
-            f"Tipo de archivo no soportado: {file_name}\n"
-            f"Formatos aceptados: .csv, .xlsx, .xls"
-        )
+    return read_table(file_obj)
 
 
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
