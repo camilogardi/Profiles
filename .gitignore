@@ -111,3 +111,8 @@ Thumbs.db
 # Streamlit
 .streamlit/*
 !.streamlit/config.toml
+
+# Demo output files
+demo_contour_output.png
+demo_*.png
+

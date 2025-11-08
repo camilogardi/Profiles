@@ -827,3 +827,441 @@ def subsample_data(
     
     else:
         raise ValueError(f"Método de submuestreo desconocido: {method}. Use 'random' o 'grid'.")
+
+
+def plot_contour_between_id_minmax(
+    df,
+    x_col='x',
+    y_col='y',
+    z_col='z',
+    id_col='ID',
+    y_limits=None,          # tuple (ymin, ymax) o None
+    n_levels=14,            # número de niveles de contorno (o lista de niveles)
+    nx=300,
+    ny=300,
+    cmap='viridis',
+    clip_to_range=True,
+    scatter_size=8,
+    title='Interpolación 2D',
+    figsize=(10,6),
+    prefer_method='cubic'   # 'cubic' o 'linear' (cubic intentará y caerá a linear si falla)
+):
+    """
+    Crea un contourf de z sobre (x,y) limitando la región a un polígono formado
+    por las cotas máximas (upper) y mínimas (lower) por cada ID (ordenado por x).
+    
+    Esta función es ideal para generar mapas de contorno de parámetros geotécnicos
+    a lo largo de sondeos, donde se quiere limitar la visualización a la región
+    entre las cotas mínimas y máximas de cada sondeo.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame con las columnas especificadas (x_col, y_col, z_col, id_col).
+    x_col : str, default='x'
+        Nombre de la columna con coordenadas X (abscisa).
+    y_col : str, default='y'
+        Nombre de la columna con coordenadas Y (cota/elevación).
+    z_col : str, default='z'
+        Nombre de la columna con valores del parámetro a interpolar.
+    id_col : str, default='ID'
+        Nombre de la columna con identificadores de sondeos/puntos.
+    y_limits : tuple or None, default=None
+        Tupla (ymin, ymax) para limitar el rango Y. Si se especifica,
+        el polígono se intersecta con esta franja horizontal y el eje Y
+        se fija a estos límites.
+    n_levels : int or array-like, default=14
+        Número de niveles de contorno (int) o lista explícita de niveles.
+    nx : int, default=300
+        Resolución de la malla de interpolación en dirección X.
+    ny : int, default=300
+        Resolución de la malla de interpolación en dirección Y.
+    cmap : str, default='viridis'
+        Nombre del colormap de matplotlib.
+    clip_to_range : bool, default=True
+        Si True, recorta los valores interpolados al rango real de z
+        para evitar overshoot de la interpolación.
+    scatter_size : int, default=8
+        Tamaño de los puntos de datos en el gráfico.
+    title : str, default='Interpolación 2D'
+        Título del gráfico.
+    figsize : tuple, default=(10, 6)
+        Tamaño de la figura (ancho, alto) en pulgadas.
+    prefer_method : str, default='cubic'
+        Método de interpolación preferido: 'cubic' o 'linear'.
+        Si 'cubic' falla, se utiliza 'linear' automáticamente.
+        
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Figura de matplotlib con el contorno generado.
+    ax : matplotlib.axes.Axes
+        Ejes de matplotlib de la figura.
+    poly : shapely.geometry.Polygon or shapely.geometry.MultiPolygon
+        Polígono usado como máscara. Puede ser un Polygon simple o
+        MultiPolygon si la intersección con y_limits genera múltiples partes.
+        
+    Raises
+    ------
+    RuntimeError
+        - Si no hay sondajes en la columna id_col
+        - Si el polígono generado es degenerado (área cero)
+        - Si la intersección con y_limits produce un polígono vacío
+        
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> df = pd.DataFrame({
+    ...     'abscisa': [100, 100, 150, 150, 200, 200],
+    ...     'cota': [50, 48, 52, 50, 51, 49],
+    ...     'qc': [2.5, 3.2, 2.8, 3.5, 2.6, 3.3],
+    ...     'ID': ['P-01', 'P-01', 'P-02', 'P-02', 'P-03', 'P-03']
+    ... })
+    >>> fig, ax, poly = plot_contour_between_id_minmax(
+    ...     df, x_col='abscisa', y_col='cota', z_col='qc', id_col='ID'
+    ... )
+    >>> print(f"Área del polígono: {poly.area:.2f}")
+    
+    Notes
+    -----
+    - La función agrupa los datos por id_col y calcula el centroide X,
+      y las cotas mínima y máxima por cada ID.
+    - Los IDs se ordenan por su centroide X para construir el polígono.
+    - El polígono se construye uniendo las cotas máximas (de izquierda a derecha)
+      con las cotas mínimas (de derecha a izquierda).
+    - Si shapely.vectorized.contains está disponible, se usa para el cálculo
+      eficiente de la máscara. Si no, se usa matplotlib.path.Path como fallback.
+    - Se requiere shapely instalado. Si no está disponible, el fallback con
+      matplotlib.path.Path se usará automáticamente.
+    
+    See Also
+    --------
+    scipy.interpolate.griddata : Interpolación 2D usada internamente
+    matplotlib.pyplot.contourf : Visualización de contornos
+    """
+    import matplotlib.pyplot as plt
+    from scipy.interpolate import griddata
+    
+    # Intentar importar shapely; si falla, usar matplotlib.path como fallback
+    try:
+        from shapely.geometry import Polygon, box
+        from shapely.ops import unary_union
+        SHAPELY_AVAILABLE = True
+    except ImportError:
+        SHAPELY_AVAILABLE = False
+        from matplotlib.path import Path
+        # Definir clase dummy Polygon para compatibilidad
+        class Polygon:
+            def __init__(self, points):
+                self.points = points
+                self.exterior = type('obj', (object,), {'coords': points})()
+                self.geom_type = 'Polygon'
+                # Calcular área usando fórmula del trapecio
+                x = [p[0] for p in points]
+                y = [p[1] for p in points]
+                self.area = 0.5 * abs(sum(x[i]*y[i+1] - x[i+1]*y[i] for i in range(len(points)-1)))
+                self.is_valid = True
+                self.is_empty = False
+                
+            def buffer(self, distance):
+                return self
+                
+            def intersection(self, other):
+                # Implementación simplificada - retorna self
+                return self
+                
+            @property
+            def bounds(self):
+                x = [p[0] for p in self.points]
+                y = [p[1] for p in self.points]
+                return (min(x), min(y), max(x), max(y))
+
+    # extraer arrays
+    x = df[x_col].values
+    y = df[y_col].values
+    z = df[z_col].values
+
+    # 1) agrupar por ID y calcular cx, ymin, ymax
+    groups = df.groupby(id_col)
+    rows = []
+    for sid, g in groups:
+        cx = g[x_col].mean()
+        ymin = g[y_col].min()
+        ymax = g[y_col].max()
+        rows.append((sid, float(cx), float(ymin), float(ymax)))
+    if len(rows) == 0:
+        raise RuntimeError(f"No hay sondajes en df['{id_col}']")
+
+    rows_arr = np.array(rows, dtype=object)
+    rows_sorted = rows_arr[rows_arr[:,1].astype(float).argsort()]
+
+    upper = [(float(r[1]), float(r[3])) for r in rows_sorted]   # (cx, ymax)
+    lower = [(float(r[1]), float(r[2])) for r in rows_sorted]   # (cx, ymin)
+
+    # construir polígono: subir por upper (izq->der), bajar por lower (der->izq)
+    poly_points = []
+    poly_points.extend(upper)
+    poly_points.extend(reversed(lower))
+    if poly_points[0] != poly_points[-1]:
+        poly_points.append(poly_points[0])
+
+    poly = Polygon(poly_points)
+    
+    if SHAPELY_AVAILABLE:
+        poly = poly.buffer(0)  # buffer(0) limpia geometrías degeneradas
+        if (not poly.is_valid) or (poly.area == 0):
+            # fallback a convex hull
+            poly = Polygon(poly_points).convex_hull
+            if poly.area == 0:
+                raise RuntimeError("El polígono generado es degenerado (área cero). Revisa los datos de ID/x/y.")
+    
+    # si se especifican límites de y, intersectar el polígono con esa franja
+    xmin, xmax = float(np.min(x)), float(np.max(x))
+    if y_limits is not None and SHAPELY_AVAILABLE:
+        from shapely.geometry import box
+        ymin_lim, ymax_lim = float(y_limits[0]), float(y_limits[1])
+        clip_box = box(xmin, ymin_lim, xmax, ymax_lim)
+        poly = poly.intersection(clip_box)
+        if poly.is_empty:
+            raise RuntimeError("La intersección del polígono con y_limits produjo un polígono vacío.")
+
+    # 2) crear grid e interpolar
+    xi = np.linspace(xmin, xmax, nx)
+    yi = np.linspace(np.min(y), np.max(y), ny)
+    Xi, Yi = np.meshgrid(xi, yi)
+
+    points = np.vstack((x, y)).T
+    Zi = None
+    if prefer_method == 'cubic':
+        try:
+            Zi = griddata(points, z, (Xi, Yi), method='cubic')
+            # si cubic falla devolviendo todo NaN, usar linear
+            if np.all(np.isnan(Zi)):
+                Zi = griddata(points, z, (Xi, Yi), method='linear')
+        except Exception:
+            Zi = griddata(points, z, (Xi, Yi), method='linear')
+    else:
+        Zi = griddata(points, z, (Xi, Yi), method='linear')
+
+    # 3) máscara: usar shapely.contains_xy si está disponible (shapely >= 2.0); si no, usar matplotlib.path.Path
+    mask_inside = None
+    if SHAPELY_AVAILABLE:
+        try:
+            # preferir shapely.contains_xy (shapely >= 2.0)
+            from shapely import contains_xy
+            mask_inside = contains_xy(poly, Xi, Yi)
+        except (ImportError, AttributeError):
+            try:
+                # fallback a shapely.vectorized.contains (shapely < 2.0, deprecated)
+                from shapely import vectorized
+                mask_inside = vectorized.contains(poly, Xi, Yi)
+            except Exception:
+                # fallback con matplotlib.path.Path
+                from matplotlib.path import Path
+                if poly.geom_type == 'Polygon':
+                    path = Path(list(poly.exterior.coords))
+                    pts = np.column_stack((Xi.ravel(), Yi.ravel()))
+                    mask_flat = path.contains_points(pts)
+                    mask_inside = mask_flat.reshape(Xi.shape)
+                else:
+                    # MultiPolygon: unir máscaras
+                    mask_flat = np.zeros(Xi.size, dtype=bool)
+                    pts = np.column_stack((Xi.ravel(), Yi.ravel()))
+                    for p in poly.geoms:
+                        path = Path(list(p.exterior.coords))
+                        mask_flat |= path.contains_points(pts)
+                    mask_inside = mask_flat.reshape(Xi.shape)
+    else:
+        # usar matplotlib.path.Path directamente
+        from matplotlib.path import Path
+        path = Path(poly.points)
+        pts = np.column_stack((Xi.ravel(), Yi.ravel()))
+        mask_flat = path.contains_points(pts)
+        mask_inside = mask_flat.reshape(Xi.shape)
+
+    # 4) enmascarar fuera del polígono o NaN
+    Zi_masked = np.ma.array(Zi, mask=(~mask_inside) | np.isnan(Zi))
+
+    # 5) opcional: clip al rango real de z para evitar overshoot
+    if clip_to_range:
+        zmin, zmax = np.nanmin(z), np.nanmax(z)
+        data = Zi_masked.data.copy()
+        data = np.clip(data, zmin, zmax)
+        Zi_masked = np.ma.array(data, mask=Zi_masked.mask)
+
+    # 6) niveles: si n_levels es int, generar linspace entre zmin y zmax
+    if isinstance(n_levels, int):
+        zmin, zmax = np.nanmin(z), np.nanmax(z)
+        levels = np.linspace(zmin, zmax, n_levels)
+    else:
+        levels = np.asarray(n_levels)
+
+    # 7) graficar
+    fig, ax = plt.subplots(figsize=figsize)
+    cf = ax.contourf(Xi, Yi, Zi_masked, levels=levels, cmap=cmap, extend='neither')
+    cs = ax.contour(Xi, Yi, Zi_masked, levels=levels, colors='k', linewidths=0.5, alpha=0.6)
+    try:
+        ax.clabel(cs, inline=True, fontsize=8, fmt="%.2f")
+    except Exception:
+        pass
+
+    # polígono borde
+    if SHAPELY_AVAILABLE and poly.geom_type == 'Polygon':
+        xp, yp = poly.exterior.xy
+        ax.plot(xp, yp, color='k', linewidth=1.2, alpha=0.9, label='polígono (min/max por ID)')
+    elif SHAPELY_AVAILABLE:
+        # MultiPolygon
+        for p in poly.geoms:
+            xp, yp = p.exterior.xy
+            ax.plot(xp, yp, color='k', linewidth=1.2, alpha=0.9)
+    else:
+        # Fallback sin shapely
+        xp = [p[0] for p in poly.points]
+        yp = [p[1] for p in poly.points]
+        ax.plot(xp, yp, color='k', linewidth=1.2, alpha=0.9, label='polígono (min/max por ID)')
+
+    # puntos originales
+    ax.scatter(x, y, c='k', s=scatter_size, alpha=0.8, edgecolors='white', linewidth=0.3)
+
+    # ejes y título
+    if y_limits is not None:
+        ax.set_ylim(y_limits)
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_col)
+    ax.set_title(title)
+    plt.colorbar(cf, ax=ax, label=z_col)
+    ax.legend(loc='upper right')
+
+    plt.tight_layout()
+    return fig, ax, poly
+
+
+def export_interpolated_grid_to_csv(grid_x, grid_y, grid_values, include_masked=False):
+    """
+    Exporta la grilla interpolada a formato CSV (x, y, value).
+    
+    Parameters
+    ----------
+    grid_x : np.ndarray
+        Coordenadas X de la grilla (meshgrid).
+    grid_y : np.ndarray
+        Coordenadas Y de la grilla (meshgrid).
+    grid_values : np.ndarray or np.ma.MaskedArray
+        Valores interpolados en la grilla.
+    include_masked : bool, default=False
+        Si True, incluye puntos enmascarados con valor NaN.
+        Si False, solo exporta puntos válidos (no enmascarados).
+        
+    Returns
+    -------
+    str
+        String con el contenido CSV (x,y,value).
+        
+    Examples
+    --------
+    >>> import numpy as np
+    >>> x = np.array([[0, 1], [0, 1]])
+    >>> y = np.array([[0, 0], [1, 1]])
+    >>> v = np.array([[1.0, 2.0], [3.0, 4.0]])
+    >>> csv = export_interpolated_grid_to_csv(x, y, v)
+    >>> print(csv.split('\\n')[0])  # header
+    x,y,value
+    """
+    # Aplanar las grillas
+    x_flat = grid_x.ravel()
+    y_flat = grid_y.ravel()
+    
+    # Manejar MaskedArray
+    if isinstance(grid_values, np.ma.MaskedArray):
+        v_flat = grid_values.filled(np.nan).ravel()
+    else:
+        v_flat = grid_values.ravel()
+    
+    # Crear DataFrame
+    df_export = pd.DataFrame({
+        'x': x_flat,
+        'y': y_flat,
+        'value': v_flat
+    })
+    
+    # Filtrar NaN si no se requieren
+    if not include_masked:
+        df_export = df_export.dropna(subset=['value'])
+    
+    # Convertir a CSV
+    return df_export.to_csv(index=False)
+
+
+def figure_to_bytes(fig, format='png', dpi=300):
+    """
+    Convierte una figura de matplotlib a bytes para descarga.
+    
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        Figura de matplotlib a convertir.
+    format : str, default='png'
+        Formato de imagen: 'png', 'jpg', 'svg', 'pdf'.
+    dpi : int, default=300
+        Resolución en puntos por pulgada (para formatos raster).
+        
+    Returns
+    -------
+    bytes
+        Bytes de la imagen en el formato especificado.
+        
+    Examples
+    --------
+    >>> import matplotlib.pyplot as plt
+    >>> fig, ax = plt.subplots()
+    >>> ax.plot([1, 2, 3], [1, 2, 3])
+    >>> img_bytes = figure_to_bytes(fig)
+    >>> isinstance(img_bytes, bytes)
+    True
+    """
+    from io import BytesIO
+    
+    buf = BytesIO()
+    fig.savefig(buf, format=format, dpi=dpi, bbox_inches='tight')
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def polygon_to_geojson(poly):
+    """
+    Convierte un polígono de shapely a formato GeoJSON.
+    
+    Parameters
+    ----------
+    poly : shapely.geometry.Polygon or shapely.geometry.MultiPolygon
+        Polígono a convertir.
+        
+    Returns
+    -------
+    dict
+        Diccionario con la geometría en formato GeoJSON.
+        
+    Examples
+    --------
+    >>> from shapely.geometry import Polygon
+    >>> poly = Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
+    >>> geojson = polygon_to_geojson(poly)
+    >>> geojson['type']
+    'Feature'
+    
+    Notes
+    -----
+    Requiere shapely instalado. Si no está disponible, retorna None.
+    """
+    try:
+        from shapely.geometry import mapping
+        return {
+            'type': 'Feature',
+            'geometry': mapping(poly),
+            'properties': {
+                'area': poly.area,
+                'bounds': poly.bounds
+            }
+        }
+    except ImportError:
+        return None
